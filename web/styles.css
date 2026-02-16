@@ -1,0 +1,99 @@
+:root {
+  --bg: #0b0f17;
+  --card: #121a27;
+  --text: #e9eef7;
+  --muted: #a9b4c7;
+  --border: #263246;
+  --accent: #6ea8fe;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Helvetica Neue";
+  background: var(--bg);
+  color: var(--text);
+}
+
+.wrap { max-width: 1100px; margin: 0 auto; padding: 20px; }
+header { margin-bottom: 16px; }
+h1 { margin: 0 0 6px 0; font-size: 22px; }
+.sub { margin: 0; color: var(--muted); }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+  margin-bottom: 14px;
+}
+
+.row { display: grid; gap: 10px; grid-template-columns: 2fr 1fr 1fr 1fr 1fr; }
+.col label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+input, select {
+  width: 100%;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #0f1522;
+  color: var(--text);
+}
+
+.actions { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
+button {
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: #0f1522;
+  color: var(--text);
+  cursor: pointer;
+}
+button:hover { border-color: var(--accent); }
+
+.status { color: var(--muted); font-size: 13px; }
+
+.grid { display: grid; gap: 14px; grid-template-columns: 1fr 1fr; }
+
+.pre {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  background: #0f1522;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  min-height: 250px;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.lines { display: grid; gap: 8px; }
+.line {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #0f1522;
+}
+.line .meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+
+/* Fields */
+.fields { display: grid; gap: 8px; }
+.kv {
+  display: grid;
+  grid-template-columns: 190px 1fr;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #0f1522;
+  align-items: start;
+}
+.kv .k { color: var(--muted); font-size: 12px; }
+.kv .v { color: var(--text); font-size: 14px; white-space: pre-wrap; }
+.kv.empty { grid-template-columns: 1fr; color: var(--muted); }
+
+footer { color: var(--muted); }
+@media (max-width: 980px) {
+  .row { grid-template-columns: 1fr; }
+  .grid { grid-template-columns: 1fr; }
+  .kv { grid-template-columns: 1fr; }
+}

@@ -1,0 +1,95 @@
+# ==============================
+# Python
+# ==============================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+*.pyo
+
+# Virtual environment
+.venv/
+venv/
+env/
+ENV/
+
+# ==============================
+# Environment / Secrets
+# ==============================
+.env
+.env.*
+*.env
+*.key
+*.pem
+
+# ==============================
+# OS Files
+# ==============================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==============================
+# IDE / Editor
+# ==============================
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# ==============================
+# Logs
+# ==============================
+*.log
+logs/
+log/
+
+# ==============================
+# Build / Dist
+# ==============================
+build/
+dist/
+*.egg-info/
+*.egg
+
+# ==============================
+# PaddleOCR / Model Cache
+# ==============================
+.paddleocr/
+paddleocr/
+~/.paddleocr/
+C:/Users/*/.paddleocr/
+
+# ==============================
+# Uploaded Files (if any local folder)
+# ==============================
+uploads/
+temp/
+tmp/
+
+# ==============================
+# Generated Outputs
+# ==============================
+output/
+outputs/
+results/
+debug/
+
+# ==============================
+# Jupyter / Notebook
+# ==============================
+.ipynb_checkpoints/
+
+# ==============================
+# Coverage / Testing
+# ==============================
+.coverage
+htmlcov/
+.pytest_cache/
+
+# ==============================
+# System Files
+# ==============================
+*.sqlite3
+*.db

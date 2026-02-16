@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>OCR Engine (English) - Local UI</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>OCR Engine (English)</h1>
+      <p class="sub">Upload PDF / Image → get extracted text + structured JSON (bbox + confidence) + extracted fields.</p>
+    </header>
+
+    <section class="card">
+      <div class="row">
+        <div class="col">
+          <label>File</label>
+          <input id="file" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp" />
+        </div>
+
+        <div class="col">
+          <label>Preset</label>
+          <select id="preset">
+            <option value="auto" selected>auto</option>
+            <option value="clean_doc">clean_doc</option>
+            <option value="photo">photo</option>
+            <option value="low_light">low_light</option>
+          </select>
+        </div>
+
+        <div class="col">
+          <label>DPI (PDF)</label>
+          <input id="dpi" type="number" value="300" min="72" max="600" />
+        </div>
+
+        <div class="col">
+          <label>Max pages (PDF)</label>
+          <input id="max_pages" type="number" value="10" min="1" max="200" />
+        </div>
+
+        <div class="col">
+          <label>Debug</label>
+          <select id="debug">
+            <option value="false" selected>false</option>
+            <option value="true">true</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button id="run">Run OCR</button>
+        <span id="status" class="status"></span>
+      </div>
+    </section>
+
+    <section class="grid">
+      <div class="card">
+        <h2>Extracted Fields (Key → Value)</h2>
+        <div id="fields" class="fields"></div>
+      </div>
+
+      <div class="card">
+        <h2>Extracted Text</h2>
+        <pre id="text" class="pre"></pre>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Structured JSON</h2>
+      <pre id="json" class="pre"></pre>
+    </section>
+
+    <section class="card">
+      <h2>Lines Preview (BBox + Conf)</h2>
+      <div id="lines" class="lines"></div>
+    </section>
+
+    <footer>
+      <small>Backend: FastAPI + PaddleOCR. Digital PDFs: text-first extraction (no bboxes).</small>
+    </footer>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
