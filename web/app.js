@@ -1,187 +1,172 @@
-const $ = (id) => document.getElementById(id);
+/* Frontend logic (no bundler). Fixes duplicate variable declarations and keeps buttons clickable. */
+
+function $(id) { return document.getElementById(id); }
 
 function setStatus(msg) {
-  $("status").textContent = msg || "";
+  const el = $("status");
+  if (el) el.textContent = msg;
 }
 
-function pretty(obj) {
-  return JSON.stringify(obj, null, 2);
+function prettyJson(obj) {
+  try { return JSON.stringify(obj, null, 2); } catch { return String(obj); }
 }
 
-function escapeHtml(s) {
-  return String(s)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function renderFields(fields) {
-  const root = $("fields");
-  root.innerHTML = "";
-
-  const keys = fields ? Object.keys(fields) : [];
-  if (!keys.length) {
-    root.innerHTML = `<div class="kv empty">No fields detected.</div>`;
-    return;
-  }
-
-  const order = ["Policy No", "SL No/Certificate No", "Company/TPA ID No", "Name", "Address", "City", "Pincode"];
-  const sorted = [...keys].sort((a, b) => {
-    const ia = order.indexOf(a), ib = order.indexOf(b);
-    if (ia === -1 && ib === -1) return a.localeCompare(b);
-    if (ia === -1) return 1;
-    if (ib === -1) return -1;
-    return ia - ib;
-  });
-
-  for (const k of sorted) {
-    const v = fields[k];
-    const row = document.createElement("div");
-    row.className = "kv";
-    row.innerHTML = `<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(v)}</div>`;
-    root.appendChild(row);
-  }
-}
-
-function renderTables(pages) {
-  const root = $("tables");
-  root.innerHTML = "";
-
-  let found = 0;
-  for (const p of (pages || [])) {
-    for (const tb of (p.tables || [])) {
-      found++;
-      const div = document.createElement("div");
-      div.className = "tablecard";
-      const cells = tb.cells || [];
-      let html = `<div class="tmeta">page ${p.page_index} | rows=${tb.n_rows} cols=${tb.n_cols}</div>`;
-      html += `<div class="tgrid">`;
-      html += `<table><tbody>`;
-      for (const row of cells.slice(0, 25)) {
-        html += "<tr>";
-        for (const cell of row.slice(0, 12)) {
-          html += `<td>${escapeHtml(cell || "")}</td>`;
-        }
-        html += "</tr>";
-      }
-      html += `</tbody></table></div>`;
-      div.innerHTML = html;
-      root.appendChild(div);
-    }
-  }
-
-  if (!found) {
-    root.innerHTML = `<div class="kv empty">No tables detected (best-effort).</div>`;
-  }
+function buildQuery(params) {
+  const esc = encodeURIComponent;
+  return Object.keys(params)
+    .map(k => `${esc(k)}=${esc(params[k])}`)
+    .join("&");
 }
 
 async function runSingleOCR() {
   const files = $("files").files;
-  if (!files || !files.length) { setStatus("Please select file(s)."); return; }
-  const f = files[0];
+  if (!files || files.length === 0) {
+    alert("Please select at least 1 file.");
+    return;
+  }
 
   const engine = $("engine").value;
   const preset = $("preset").value;
   const dpi = $("dpi").value;
   const maxPages = $("max_pages").value;
+  const returnLayout = $("return_layout").value;
   const debug = $("debug").value;
-  const returnLayout = $("return_layout").value;
-  const llmCorrect = $("llm_correct").value;
-  const returnLayout = $("return_layout").value;
-  const llmCorrect = $("llm_correct").value;
 
-  const form = new FormData();
-  form.append("file", f);
+  const qs = buildQuery({
+    engine,
+    preset,
+    dpi,
+    max_pages: maxPages,
+    return_debug: debug,
+    return_layout: returnLayout
+  });
 
-  const url = `/ocr?engine=${encodeURIComponent(engine)}&preset=${encodeURIComponent(preset)}&dpi=${encodeURIComponent(dpi)}&max_pages=${encodeURIComponent(maxPages)}&return_debug=${encodeURIComponent(debug)}&return_layout=${encodeURIComponent(returnLayout)}&llm_correct=${encodeURIComponent(llmCorrect)}`;
+  const url = `/ocr?${qs}`;
+
+  const fd = new FormData();
+  fd.append("file", files[0]);
+
+  $("raw").textContent = "";
+  $("fields").textContent = "";
+  $("text").textContent = "";
+  $("analysis").textContent = "";
   setStatus("Running OCR...");
-  const res = await fetch(url, { method: "POST", body: form });
+
+  const res = await fetch(url, { method: "POST", body: fd });
   const data = await res.json();
 
-  $("json").textContent = pretty(data);
-
   if (!res.ok) {
-    $("text").textContent = "";
-    renderFields({});
-    renderTables([]);
-    setStatus(`Error: ${data.error || res.statusText}`);
+    setStatus("Error");
+    $("raw").textContent = prettyJson(data);
     return;
   }
 
-  $("text").textContent = data.text || "";
-  renderFields(data.fields || {});
-  renderTables(data.pages || []);
-  setStatus(`Done: ${data.file_name || f.name} | engine: ${data.meta?.engine_used || data.meta?.engine || engine}`);
+  $("raw").textContent = prettyJson(data);
+  $("fields").textContent = prettyJson(data.fields || {});
+  $("text").textContent = (data.text || "");
+  $("analysis").textContent = prettyJson(data.analysis || {});
+  setStatus("Done ✅");
 }
 
 async function runBatchOCR() {
   const files = $("files").files;
-  if (!files || !files.length) { setStatus("Please select file(s)."); return; }
+  if (!files || files.length === 0) {
+    alert("Please select at least 1 file.");
+    return;
+  }
+  if (files.length > 10) {
+    alert("Batch limit is 10 files. Please select max 10 files.");
+    return;
+  }
 
   const engine = $("engine").value;
   const preset = $("preset").value;
   const dpi = $("dpi").value;
   const maxPages = $("max_pages").value;
+  const returnLayout = $("return_layout").value;
   const debug = $("debug").value;
-  const returnLayout = $("return_layout").value;
-  const llmCorrect = $("llm_correct").value;
-  const returnLayout = $("return_layout").value;
-  const llmCorrect = $("llm_correct").value;
 
-  const form = new FormData();
-  for (const f of files) form.append("files", f);
+  const qs = buildQuery({
+    engine,
+    preset,
+    dpi,
+    max_pages: maxPages,
+    return_debug: debug,
+    return_layout: returnLayout
+  });
 
-  const url = `/ocr-batch?engine=${encodeURIComponent(engine)}&preset=${encodeURIComponent(preset)}&dpi=${encodeURIComponent(dpi)}&max_pages=${encodeURIComponent(maxPages)}&return_debug=${encodeURIComponent(debug)}&return_layout=${encodeURIComponent(returnLayout)}&llm_correct=${encodeURIComponent(llmCorrect)}`;
-  setStatus("Running batch OCR...");
-  const res = await fetch(url, { method: "POST", body: form });
+  const url = `/ocr-batch?${qs}`;
+
+  const fd = new FormData();
+  for (const f of files) fd.append("files", f);
+
+  $("raw").textContent = "";
+  $("fields").textContent = "";
+  $("text").textContent = "";
+  $("analysis").textContent = "";
+  setStatus(`Running batch OCR (${files.length} files)...`);
+
+  const res = await fetch(url, { method: "POST", body: fd });
   const data = await res.json();
-  $("json").textContent = pretty(data);
 
   if (!res.ok) {
-    setStatus(`Batch error: ${data.error || res.statusText}`);
+    setStatus("Error");
+    $("raw").textContent = prettyJson(data);
     return;
   }
 
-  setStatus(`Batch done. ok=${data.ok}/${data.count}. (See JSON)`);
+  $("raw").textContent = prettyJson(data);
+
+  // show first file highlights
+  const first = (data.results && data.results[0]) ? data.results[0] : null;
+  if (first) {
+    $("fields").textContent = prettyJson(first.fields || {});
+    $("text").textContent = (first.text || "");
+    $("analysis").textContent = prettyJson(first.analysis || {});
+  }
+  setStatus("Batch Done ✅");
 }
 
 async function downloadDocx() {
   const files = $("files").files;
-  if (!files || !files.length) { setStatus("Please select file(s)."); return; }
-  const f = files[0];
+  if (!files || files.length === 0) {
+    alert("Please select at least 1 file.");
+    return;
+  }
 
   const engine = $("engine").value;
   const preset = $("preset").value;
   const dpi = $("dpi").value;
   const maxPages = $("max_pages").value;
-  const llmCorrect = $("llm_correct").value;
 
-  const form = new FormData();
-  form.append("file", f);
+  const qs = buildQuery({ engine, preset, dpi, max_pages: maxPages });
+  const url = `/ocr-docx?${qs}`;
 
-  const url = `/ocr-docx?engine=${encodeURIComponent(engine)}&preset=${encodeURIComponent(preset)}&dpi=${encodeURIComponent(dpi)}&max_pages=${encodeURIComponent(maxPages)}&llm_correct=${encodeURIComponent(llmCorrect)}`;
-  setStatus("Building DOCX...");
+  const fd = new FormData();
+  fd.append("file", files[0]);
 
-  const res = await fetch(url, { method: "POST", body: form });
+  setStatus("Generating DOCX...");
+  const res = await fetch(url, { method: "POST", body: fd });
+
   if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    setStatus(`DOCX error: ${data.error || res.statusText}`);
+    const err = await res.text();
+    alert("DOCX error: " + err);
+    setStatus("Error");
     return;
   }
 
   const blob = await res.blob();
   const a = document.createElement("a");
-  const fname = (f.name || "ocr").replace(/\.[^/.]+$/, "") + ".docx";
   a.href = URL.createObjectURL(blob);
-  a.download = fname;
+  a.download = "ocr_result.docx";
   document.body.appendChild(a);
   a.click();
   a.remove();
-  setStatus("DOCX downloaded.");
+  setStatus("DOCX downloaded ✅");
 }
 
-$("runSingle").addEventListener("click", () => runSingleOCR().catch(e => setStatus("Failed: " + e.message)));
-$("runBatch").addEventListener("click", () => runBatchOCR().catch(e => setStatus("Failed: " + e.message)));
-$("downloadDocx").addEventListener("click", () => downloadDocx().catch(e => setStatus("Failed: " + e.message)));
+window.addEventListener("DOMContentLoaded", () => {
+  $("run").addEventListener("click", runSingleOCR);
+  $("batch").addEventListener("click", runBatchOCR);
+  $("docx").addEventListener("click", downloadDocx);
+});

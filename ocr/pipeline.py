@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 """
-FINAL production pipeline (Windows/Python 3.11) with:
-- Primary OCR: PaddleOCR
-- Fallback OCR: Tesseract (pytesseract)
-- Routing: scoring + confidence gate
-- Tables: bbox-based table detection (best-effort)
-- PDFs: digital text extraction first; else render -> OCR
-- Block letters (form boxes): detect box sequences + per-box single-char OCR (Tesseract PSM10)
-- Analysis: returns analyzed document block with quality + warnings + per-page stats
+Fast + stable pipeline (Windows/Python 3.11):
+- PaddleOCR primary
+- Tesseract fallback (auto routing, less frequent for speed)
+- preset=auto uses only clean_doc (fast)
+- layout via PP-Structure (page 0 only, optional)
+- analysis always returned
+- block letters boxes supported if your field_extract uses recognize_char_fn (kept)
 """
 
 import os
@@ -18,7 +17,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from PIL import Image
 
-# ---- Windows Stability Fix (PaddleOCR / PaddlePaddle) ----
 os.environ.setdefault("FLAGS_use_mkldnn", "0")
 os.environ.setdefault("FLAGS_enable_mkldnn", "0")
 os.environ.setdefault("FLAGS_use_dnnl", "0")
@@ -36,16 +34,11 @@ from ocr.tesseract_engine import run_tesseract, run_tesseract_single_char  # noq
 from ocr.field_extract import extract_fields_from_page  # noqa: E402
 from ocr.analyze import analyze_result  # noqa: E402
 from ocr.layout import analyze_layout  # noqa: E402
-from ocr.llm_correct import maybe_llm_correct  # noqa: E402
 
 
-# -----------------------------
-# Geometry / line helpers
-# -----------------------------
 def poly_to_xyxy(poly: Any) -> List[int]:
-    pts = poly
-    xs = [p[0] for p in pts]
-    ys = [p[1] for p in pts]
+    xs = [p[0] for p in poly]
+    ys = [p[1] for p in poly]
     return [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
 
 
@@ -102,9 +95,6 @@ def group_into_lines(words: List[dict]) -> List[List[dict]]:
     return lines
 
 
-# -----------------------------
-# PaddleOCR singleton
-# -----------------------------
 _OCR_INSTANCE: Optional[PaddleOCR] = None
 
 
@@ -120,20 +110,15 @@ def get_paddle() -> PaddleOCR:
         return _OCR_INSTANCE
     except TypeError:
         pass
-
     try:
         _OCR_INSTANCE = PaddleOCR(**common_kwargs, enable_mkldnn=False)
         return _OCR_INSTANCE
     except TypeError:
         pass
-
     _OCR_INSTANCE = PaddleOCR(**common_kwargs)
     return _OCR_INSTANCE
 
 
-# -----------------------------
-# Routing score
-# -----------------------------
 def _score_words(words: List[dict]) -> float:
     if not words:
         return 0.0
@@ -154,8 +139,9 @@ def _route_engine(img_rgb: np.ndarray, paddle_words: List[dict], force_engine: s
     if force_engine == "tesseract":
         return "tesseract", run_tesseract(img_rgb)
 
+    # Speed-leaning: prefer Paddle if it's "good enough"
     paddle_score = _score_words(paddle_words)
-    if paddle_score >= 0.65 and sum(len((w.get("text") or "")) for w in paddle_words) >= 60:
+    if paddle_score >= 0.60 and sum(len((w.get("text") or "")) for w in paddle_words) >= 60:
         return "paddleocr", paddle_words
 
     tess_words = run_tesseract(img_rgb)
@@ -165,9 +151,6 @@ def _route_engine(img_rgb: np.ndarray, paddle_words: List[dict], force_engine: s
     return "paddleocr", paddle_words
 
 
-# -----------------------------
-# OCR runners
-# -----------------------------
 def _read_image(path: str) -> np.ndarray:
     img = Image.open(path).convert("RGB")
     return np.array(img)
@@ -195,29 +178,23 @@ def _paddle_words_on_image(img_rgb: np.ndarray) -> List[dict]:
         if isinstance(item, (list, tuple)) and len(item) >= 2:
             poly = item[0]
             tc = item[1]
-
             if isinstance(tc, (list, tuple)) and len(tc) >= 2:
                 text = str(tc[0])
                 conf = float(tc[1])
             else:
                 continue
-
             try:
                 bbox = poly_to_xyxy(poly)
             except Exception:
                 continue
-
             words.append({"text": text, "conf": conf, "bbox": bbox})
-
     return words
 
 
-# -----------------------------
-# Preset selection (preprocess)
-# -----------------------------
 def _ocr_best_of_presets(img_rgb: np.ndarray, preset: str) -> Tuple[List[dict], str, np.ndarray]:
+    # FAST: auto only runs clean_doc
+    presets = ["clean_doc"] if preset == "auto" else [preset]
     candidates = []
-    presets = ["clean_doc", "photo", "low_light"] if preset == "auto" else [preset]
     for pr in presets:
         proc, used = preprocess(img_rgb, preset=pr)
         words = _paddle_words_on_image(proc)
@@ -231,12 +208,11 @@ def _ocr_best_of_presets(img_rgb: np.ndarray, preset: str) -> Tuple[List[dict], 
 def run_ocr(
     input_path: str,
     preset: str = "auto",
-    dpi: int = 300,
-    max_pages: int = 10,
-    return_debug: bool = False,
+    dpi: int = 200,
+    max_pages: int = 5,
+    return_debug: bool = True,
     engine: str = "auto",
-    return_layout: bool = False,
-    llm_correct: bool = False,
+    return_layout: bool = True,
 ) -> Dict[str, Any]:
     p = Path(input_path)
     if not p.exists():
@@ -253,10 +229,8 @@ def run_ocr(
         "mkldnn_disabled": True,
         "engine_requested": engine,
         "return_layout": bool(return_layout),
-        "llm_correct": bool(llm_correct),
     }
 
-    # Digital PDF shortcut (text-only)
     if suffix == ".pdf":
         digital = extract_text_if_digital(str(p))
         if digital is not None:
@@ -268,13 +242,9 @@ def run_ocr(
             out["fields"] = {}
             for pg in out.get("pages", []):
                 pg["tables"] = []
+                pg["layout"] = {"available": False, "blocks": []}
             out["text"] = normalize_linebreaks(out.get("text") or "")
             out["analysis"] = analyze_result(out)
-            # Optional LLM cleanup (digital PDFs usually already clean)
-            llm = maybe_llm_correct(out.get("text") or "", enabled=llm_correct)
-            out["llm"] = llm
-            if llm.get("enabled"):
-                out["text"] = llm.get("text") or out["text"]
             return out
 
         meta["digital_pdf"] = False
@@ -300,7 +270,6 @@ def run_ocr(
         meta["engine_used"] = engine_used_first or engine_used
 
         h, w = used_img.shape[:2]
-
         line_groups = group_into_lines(final_words)
 
         lines: List[Line] = []
@@ -311,34 +280,29 @@ def run_ocr(
                 continue
             bbox = merge_line_bbox(grp)
             conf = compute_line_conf(grp)
-            lines.append(
-                Line(
-                    text=txt,
-                    conf=conf,
-                    bbox=bbox,
-                    words=[Word(text=x["text"], conf=float(x["conf"]), bbox=x["bbox"]) for x in grp],
-                )
-            )
+            lines.append(Line(
+                text=txt,
+                conf=conf,
+                bbox=bbox,
+                words=[Word(text=x["text"], conf=float(x["conf"]), bbox=x["bbox"]) for x in grp],
+            ))
             page_text_lines.append(txt)
 
         page_text = "\n".join(page_text_lines).strip()
         page_results.append(PageResult(page_index=page_idx, width=w, height=h, text=page_text, lines=lines))
 
         if return_debug:
-            debug_info.append(
-                {
-                    "page_index": page_idx,
-                    "preset_used": used_preset,
-                    "engine_used": engine_used,
-                    "words_count": len(final_words),
-                    "lines_count": len(lines),
-                    "score": _score_words(final_words),
-                }
-            )
+            debug_info.append({
+                "page_index": page_idx,
+                "preset_used": used_preset,
+                "engine_used": engine_used,
+                "words_count": len(final_words),
+                "lines_count": len(lines),
+                "score": _score_words(final_words),
+            })
 
     out = to_dict(page_results, meta)
 
-    # normalize text
     out["text"] = normalize_linebreaks(out.get("text") or "")
     for pg in out.get("pages", []):
         pg["text"] = normalize_linebreaks(pg.get("text") or "")
@@ -347,26 +311,21 @@ def run_ocr(
     for pg in out.get("pages", []):
         pg["tables"] = detect_tables_from_page(pg)
 
-    # layout (best-effort) via Paddle PP-Structure
+    # layout (page 0 only)
     if return_layout:
         for i, pg in enumerate(out.get("pages", [])):
-            try:
-                # We don't have per-page RGB stored; reuse OCR words bboxes only if needed.
-                # For best results, call layout on the rendered image.
-                # We kept first_page_img only; so we run layout on first page and mark others unavailable.
-                if i == 0 and first_page_img is not None:
-                    pg["layout"] = analyze_layout(first_page_img)
-                else:
-                    pg["layout"] = {"available": False, "blocks": []}
-            except Exception:
+            if i == 0 and first_page_img is not None:
+                pg["layout"] = analyze_layout(first_page_img)
+            else:
                 pg["layout"] = {"available": False, "blocks": []}
+    else:
+        for pg in out.get("pages", []):
+            pg["layout"] = {"available": False, "blocks": []}
 
-    # fields + boxed sequences (block letters)
+    # fields (page 0) + boxed single-char OCR
     if out.get("pages") and first_page_img is not None:
         def _char_fn(crop_rgb: np.ndarray) -> Dict[str, Any]:
-            # choose whitelist suitable for forms (alnum)
             return run_tesseract_single_char(crop_rgb, whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
-
         out["fields"] = extract_fields_from_page(out["pages"][0], first_page_img, recognize_char_fn=_char_fn)
         out["fields"] = validate_fields(out.get("fields") or {})
     else:
@@ -374,14 +333,6 @@ def run_ocr(
 
     if return_debug:
         out["debug"] = debug_info
-
-    # Optional LLM cleanup (text only)
-    llm = maybe_llm_correct(out.get("text") or "", enabled=llm_correct)
-    out["llm"] = llm
-    if llm.get("enabled"):
-        out["text"] = llm.get("text") or out["text"]
-        # Also normalize again after LLM
-        out["text"] = normalize_linebreaks(out.get("text") or "")
 
     out["analysis"] = analyze_result(out)
     return out

@@ -2,28 +2,26 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>OCR Engine (English) - Local UI</title>
-  <link rel="stylesheet" href="/styles.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OCR Agent</title>
+  <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-  <div class="wrap">
-    <header>
-      <h1>OCR Engine (English)</h1>
-      <p class="sub">Upload PDF / Image → extracted text + structured JSON + fields + table detection + DOCX export.</p>
-    </header>
+  <div class="container">
+    <h1>OCR Agent</h1>
+    <p class="muted">Upload images/PDFs. Batch supports up to 10 files.</p>
 
-    <section class="card">
-      <div class="row">
+    <div class="card">
+      <div class="grid">
         <div class="col">
-          <label>Files (multi)</label>
-          <input id="files" type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp" />
+          <label>Files (multi-select)</label>
+          <input id="files" type="file" multiple />
         </div>
 
         <div class="col">
           <label>Engine</label>
           <select id="engine">
-            <option value="auto" selected>auto (paddle → fallback tesseract)</option>
+            <option value="auto" selected>auto</option>
             <option value="paddle">paddle</option>
             <option value="tesseract">tesseract</option>
           </select>
@@ -41,72 +39,58 @@
 
         <div class="col">
           <label>DPI (PDF)</label>
-          <input id="dpi" type="number" value="300" min="72" max="600" />
+          <input id="dpi" type="number" value="200" min="72" max="600" />
         </div>
 
         <div class="col">
           <label>Max pages (PDF)</label>
-          <input id="max_pages" type="number" value="10" min="1" max="200" />
+          <input id="max_pages" type="number" value="5" min="1" max="200" />
         </div>
 
         <div class="col">
           <label>Layout (PP-Structure)</label>
           <select id="return_layout">
-            <option value="false" selected>false</option>
-            <option value="true">true</option>
-          </select>
-        </div>
-
-        <div class="col">
-          <label>LLM cleanup (optional)</label>
-          <select id="llm_correct">
-            <option value="false" selected>false</option>
-            <option value="true">true</option>
+            <option value="false">false</option>
+            <option value="true" selected>true</option>
           </select>
         </div>
 
         <div class="col">
           <label>Debug</label>
           <select id="debug">
-            <option value="false" selected>false</option>
-            <option value="true">true</option>
+            <option value="false">false</option>
+            <option value="true" selected>true</option>
           </select>
         </div>
       </div>
 
       <div class="actions">
-        <button id="runSingle">Run OCR (first file)</button>
-        <button id="runBatch">Run Batch OCR</button>
-        <button id="downloadDocx">Download DOCX (first file)</button>
-        <span id="status" class="status"></span>
+        <button id="run" type="button">Run OCR (first file)</button>
+        <button id="batch" type="button">Run Batch OCR</button>
+        <button id="docx" type="button">Download DOCX (first file)</button>
+        <span id="status" class="muted"></span>
       </div>
-    </section>
+    </div>
 
-    <section class="grid">
-      <div class="card">
-        <h2>Extracted Fields (Key → Value)</h2>
-        <div id="fields" class="fields"></div>
-      </div>
+    <div class="card">
+      <h2>Extracted Fields (Key → Value)</h2>
+      <pre id="fields"></pre>
+    </div>
 
-      <div class="card">
-        <h2>Extracted Text</h2>
-        <pre id="text" class="pre"></pre>
-      </div>
-    </section>
+    <div class="card">
+      <h2>Analysis</h2>
+      <pre id="analysis"></pre>
+    </div>
 
-    <section class="card">
-      <h2>Detected Tables (best-effort)</h2>
-      <div id="tables" class="tables"></div>
-    </section>
+    <div class="card">
+      <h2>Extracted Text</h2>
+      <pre id="text"></pre>
+    </div>
 
-    <section class="card">
-      <h2>Structured JSON</h2>
-      <pre id="json" class="pre"></pre>
-    </section>
-
-    <footer>
-      <small>Backend: FastAPI + PaddleOCR + Tesseract fallback. Digital PDFs: text-first extraction (no bboxes/tables).</small>
-    </footer>
+    <div class="card">
+      <h2>Raw JSON</h2>
+      <pre id="raw"></pre>
+    </div>
   </div>
 
   <script src="/app.js"></script>

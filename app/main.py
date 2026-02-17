@@ -2,41 +2,36 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List
 
-from fastapi import FastAPI, UploadFile, File, Query
+from fastapi import FastAPI, File, UploadFile, Query, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
-from fastapi.staticfiles import StaticFiles
 
 from ocr.pipeline import run_ocr
 from ocr.docx_export import build_docx_from_result
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-WEB_DIR = BASE_DIR / "web"
 
-app = FastAPI(title="Production OCR Engine (English, Multi-Engine)")
-
-app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
+APP_DIR = Path(__file__).resolve().parent.parent
+WEB_DIR = APP_DIR / "web"
+OUT_DIR = APP_DIR / "out"
 
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+app = FastAPI(title="OCR Agent")
 
 
 @app.get("/", response_class=HTMLResponse)
 def home():
-    return FileResponse(str(WEB_DIR / "index.html"))
+    return (WEB_DIR / "index.html").read_text(encoding="utf-8")
 
 
 @app.get("/app.js")
 def app_js():
-    return FileResponse(str(WEB_DIR / "app.js"), media_type="application/javascript")
+    return FileResponse(WEB_DIR / "app.js", media_type="application/javascript")
 
 
 @app.get("/styles.css")
 def styles_css():
-    return FileResponse(str(WEB_DIR / "styles.css"), media_type="text/css")
+    return FileResponse(WEB_DIR / "styles.css", media_type="text/css")
 
 
 @app.get("/favicon.ico")
@@ -44,151 +39,119 @@ def favicon():
     return Response(status_code=204)
 
 
-def _validate_suffix(filename: str) -> str:
-    suffix = Path(filename or "").suffix.lower()
-    if suffix not in [".pdf", ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp"]:
-        raise ValueError(f"Unsupported file type: {suffix}. Upload PDF or image.")
-    return suffix
-
-
-def _validate_engine(engine: str) -> str:
-    eng = (engine or "auto").lower().strip()
-    if eng not in {"auto", "paddle", "tesseract"}:
-        raise ValueError("engine must be one of: auto, paddle, tesseract")
-    return eng
-
-
 @app.post("/ocr")
 async def ocr_endpoint(
     file: UploadFile = File(...),
-    preset: str = Query(default="auto"),
-    dpi: int = Query(default=300, ge=72, le=600),
-    max_pages: int = Query(default=10, ge=1, le=200),
     engine: str = Query(default="auto"),
-    return_debug: bool = Query(default=False),
-    return_layout: bool = Query(default=False),
-    llm_correct: bool = Query(default=False),
+    preset: str = Query(default="auto"),
+    dpi: int = Query(default=200, ge=72, le=600),
+    max_pages: int = Query(default=5, ge=1, le=200),
+    return_debug: bool = Query(default=True),
+    return_layout: bool = Query(default=True),
 ):
+    suffix = Path(file.filename or "upload").suffix.lower()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        content = await file.read()
+        tmp.write(content)
+        tmp_path = Path(tmp.name)
+
     try:
-        _validate_suffix(file.filename or "")
-        engine = _validate_engine(engine)
-    except Exception as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
-
-    with tempfile.TemporaryDirectory() as td:
-        tmp_path = Path(td) / (file.filename or "upload.bin")
-        tmp_path.write_bytes(await file.read())
-
+        result = run_ocr(
+            input_path=str(tmp_path),
+            preset=preset,
+            dpi=dpi,
+            max_pages=max_pages,
+            return_debug=return_debug,
+            engine=engine,
+            return_layout=return_layout,
+        )
+        return JSONResponse(content=result)
+    finally:
         try:
-            result = run_ocr(
-                input_path=str(tmp_path),
+            tmp_path.unlink(missing_ok=True)  # type: ignore[arg-type]
+        except Exception:
+            pass
+
+
+@app.post("/ocr-batch")
+async def ocr_batch_endpoint(
+    files: List[UploadFile] = File(...),
+    engine: str = Query(default="auto"),
+    preset: str = Query(default="auto"),
+    dpi: int = Query(default=200, ge=72, le=600),
+    max_pages: int = Query(default=5, ge=1, le=200),
+    return_debug: bool = Query(default=True),
+    return_layout: bool = Query(default=True),
+):
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded.")
+    if len(files) > 10:
+        raise HTTPException(status_code=400, detail="Batch limit is 10 files. Please upload max 10.")
+
+    results: List[Dict[str, Any]] = []
+    tmp_paths: List[Path] = []
+
+    try:
+        # Save all first
+        for f in files:
+            suffix = Path(f.filename or "upload").suffix.lower()
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(await f.read())
+                tmp_paths.append(Path(tmp.name))
+
+        # OCR sequential (stable for PaddleOCR singleton on Windows)
+        for tp, f in zip(tmp_paths, files):
+            r = run_ocr(
+                input_path=str(tp),
                 preset=preset,
                 dpi=dpi,
                 max_pages=max_pages,
                 return_debug=return_debug,
                 engine=engine,
                 return_layout=return_layout,
-                llm_correct=llm_correct,
             )
-            result["file_name"] = file.filename or "upload.bin"
-            return JSONResponse(content=result)
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            return JSONResponse(status_code=500, content={"error": str(e), "type": type(e).__name__})
+            results.append({"filename": f.filename, **r})
+
+        return JSONResponse(content={"count": len(results), "results": results})
+    finally:
+        for p in tmp_paths:
+            try:
+                p.unlink(missing_ok=True)  # type: ignore[arg-type]
+            except Exception:
+                pass
 
 
 @app.post("/ocr-docx")
 async def ocr_docx_endpoint(
     file: UploadFile = File(...),
-    preset: str = Query(default="auto"),
-    dpi: int = Query(default=300, ge=72, le=600),
-    max_pages: int = Query(default=10, ge=1, le=200),
     engine: str = Query(default="auto"),
-    llm_correct: bool = Query(default=False),
+    preset: str = Query(default="auto"),
+    dpi: int = Query(default=200, ge=72, le=600),
+    max_pages: int = Query(default=5, ge=1, le=200),
 ):
-    """Returns a .docx with fields, text and detected tables (best-effort)."""
+    suffix = Path(file.filename or "upload").suffix.lower()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(await file.read())
+        tmp_in = Path(tmp.name)
+
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = OUT_DIR / "ocr_result.docx"
+
     try:
-        _validate_suffix(file.filename or "")
-        engine = _validate_engine(engine)
-    except Exception as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        result = run_ocr(
+            input_path=str(tmp_in),
+            preset=preset,
+            dpi=dpi,
+            max_pages=max_pages,
+            return_debug=False,
+            engine=engine,
+            return_layout=False,
+        )
 
-    with tempfile.TemporaryDirectory() as td:
-        tmp_in = Path(td) / (file.filename or "upload.bin")
-        tmp_in.write_bytes(await file.read())
-
+        build_docx_from_result(result, str(out_path), title="OCR Output")
+        return FileResponse(str(out_path), filename="ocr_result.docx")
+    finally:
         try:
-            result = run_ocr(
-                input_path=str(tmp_in),
-                preset=preset,
-                dpi=dpi,
-                max_pages=max_pages,
-                return_debug=False,
-                engine=engine,
-                return_layout=return_layout,
-                llm_correct=llm_correct,
-            )
-            docx_path = Path(td) / "output.docx"
-            build_docx_from_result(result, str(docx_path), title=(file.filename or "OCR Output"))
-            out_name = (Path(file.filename or "ocr").stem + ".docx")
-            return FileResponse(
-                str(docx_path),
-                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                filename=out_name,
-            )
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            return JSONResponse(status_code=500, content={"error": str(e), "type": type(e).__name__})
-
-
-@app.post("/ocr-batch")
-async def ocr_batch_endpoint(
-    files: List[UploadFile] = File(...),
-    preset: str = Query(default="auto"),
-    dpi: int = Query(default=300, ge=72, le=600),
-    max_pages: int = Query(default=10, ge=1, le=200),
-    engine: str = Query(default="auto"),
-    return_debug: bool = Query(default=False),
-    return_layout: bool = Query(default=False),
-    llm_correct: bool = Query(default=False),
-):
-    """Batch OCR: returns JSON list. (No zip)"""
-    try:
-        engine = _validate_engine(engine)
-    except Exception as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
-
-    results = []
-    with tempfile.TemporaryDirectory() as td:
-        for f in files:
-            try:
-                _validate_suffix(f.filename or "")
-            except Exception as e:
-                results.append({"file_name": f.filename or "unknown", "error": str(e)})
-                continue
-
-            tmp_path = Path(td) / (f.filename or "upload.bin")
-            tmp_path.write_bytes(await f.read())
-
-            try:
-                r = run_ocr(
-                    input_path=str(tmp_path),
-                    preset=preset,
-                    dpi=dpi,
-                    max_pages=max_pages,
-                    return_debug=return_debug,
-                    engine=engine,
-                                    return_layout=return_layout,
-                    llm_correct=llm_correct,
-                )
-                r["file_name"] = f.filename or "upload.bin"
-                results.append(r)
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                results.append({"file_name": f.filename or "unknown", "error": str(e), "type": type(e).__name__})
-
-    ok = sum(1 for r in results if "error" not in r)
-    return JSONResponse(content={"count": len(results), "ok": ok, "results": results})
+            tmp_in.unlink(missing_ok=True)  # type: ignore[arg-type]
+        except Exception:
+            pass
