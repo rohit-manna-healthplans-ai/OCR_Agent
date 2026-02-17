@@ -12,12 +12,13 @@ Production pipeline (Windows/Python 3.11) with:
 
 import os
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image
 
 # ---- Windows Stability Fix (PaddleOCR / PaddlePaddle) ----
+# Avoid OneDNN/MKLDNN issues on some Windows setups
 os.environ.setdefault("FLAGS_use_mkldnn", "0")
 os.environ.setdefault("FLAGS_enable_mkldnn", "0")
 os.environ.setdefault("FLAGS_use_dnnl", "0")
@@ -28,115 +29,89 @@ from paddleocr import PaddleOCR  # noqa: E402
 
 from ocr.pdf_utils import extract_text_if_digital, render_pdf_to_images  # noqa: E402
 from ocr.preprocess import preprocess  # noqa: E402
-from ocr.postprocess import clean_text, normalize_linebreaks, validate_fields  # noqa: E402
-from ocr.postprocess import clean_text as _clean_text  # backward compat if older file
-from ocr.postprocess import validate_fields as _validate_fields  # backward compat if older file
-from ocr.postprocess import normalize_linebreaks as _normalize_linebreaks  # backward compat if older file
-
-from ocr.postprocess import clean_text as _ct  # noqa: F401
-from ocr.postprocess import validate_fields as _vf  # noqa: F401
-
-from ocr.postprocess import clean_text, validate_fields  # type: ignore  # noqa: E402
-
-from ocr.postprocess import clean_text as __clean_text  # noqa: F401
-
-from ocr.postprocess import clean_text, validate_fields  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields  # noqa: E402
-
-# Local modules from your repo
-from ocr.postprocess import clean_text, validate_fields  # noqa: E402
-from ocr.postprocess import normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields  # noqa: E402
-from ocr.postprocess import normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields  # noqa: E402
-from ocr.postprocess import normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields  # noqa: E402
-from ocr.postprocess import normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields  # noqa: E402
-from ocr.postprocess import normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields  # noqa: E402
-from ocr.postprocess import normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields  # noqa: E402
-from ocr.postprocess import normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields  # noqa: E402
-from ocr.postprocess import normalize_linebreaks  # noqa: E402
-
-# ^^^ some environments duplicate-import due to refactors; harmless but keep stable.
-
-from ocr.postprocess import clean_text, validate_fields, normalize_linebreaks  # noqa: E402
-from ocr.postprocess import clean_text as _ct2  # noqa: F401
-
-from ocr.postprocess import clean_text, validate_fields, normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields, normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields, normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields, normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields, normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields, normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields, normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields, normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields, normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields, normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields, normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields, normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields, normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields, normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields, normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields, normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields, normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields, normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields, normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields, normalize_linebreaks  # noqa: E402
-
-from ocr.postprocess import clean_text, validate_fields, normalize_linebreaks  # noqa: E402
-from ocr.postprocess import clean_text as _ct3  # noqa: F401
-
-# Structured output helpers
-from ocr.postprocess import (  # noqa: E402
-    poly_to_xyxy,
-    group_into_lines,
-    merge_line_bbox,
-    compute_line_conf,
-    line_text,
-)
+from ocr.postprocess import normalize_linebreaks, validate_fields  # noqa: E402
 from ocr.schemas import Word, Line, PageResult, to_dict  # noqa: E402
 from ocr.field_extract import extract_fields_from_page  # noqa: E402
 from ocr.table_detect import detect_tables_from_page  # noqa: E402
-
-# Tesseract (fallback)
 from ocr.tesseract_engine import run_tesseract  # noqa: E402
+
+
+# -----------------------------
+# Geometry / line helpers (kept here to avoid import mismatch)
+# -----------------------------
+def poly_to_xyxy(poly: Any) -> List[int]:
+    """
+    PaddleOCR returns polygon as list of 4 points [[x,y]...].
+    Convert to bbox [x1,y1,x2,y2].
+    """
+    pts = poly
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    x1, y1, x2, y2 = int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))
+    return [x1, y1, x2, y2]
+
+
+def merge_line_bbox(words: List[dict]) -> List[int]:
+    x1 = min(w["bbox"][0] for w in words)
+    y1 = min(w["bbox"][1] for w in words)
+    x2 = max(w["bbox"][2] for w in words)
+    y2 = max(w["bbox"][3] for w in words)
+    return [int(x1), int(y1), int(x2), int(y2)]
+
+
+def compute_line_conf(words: List[dict]) -> float:
+    if not words:
+        return 0.0
+    return float(sum(float(w.get("conf", 0.0)) for w in words) / max(1, len(words)))
+
+
+def line_text(words: List[dict]) -> str:
+    # left-to-right
+    ws = sorted(words, key=lambda w: (w["bbox"][0], w["bbox"][1]))
+    return " ".join((w.get("text") or "").strip() for w in ws).strip()
+
+
+def group_into_lines(words: List[dict]) -> List[List[dict]]:
+    """
+    Simple, robust line grouping using y-center proximity.
+    Works for both Paddle and Tesseract bboxes.
+    """
+    if not words:
+        return []
+
+    def y_center(w: dict) -> float:
+        return (w["bbox"][1] + w["bbox"][3]) / 2.0
+
+    ws = sorted(words, key=lambda w: (y_center(w), w["bbox"][0]))
+    lines: List[List[dict]] = []
+    current: List[dict] = []
+    current_y: Optional[float] = None
+
+    # threshold based on median word height
+    heights = sorted(max(1, w["bbox"][3] - w["bbox"][1]) for w in ws)
+    med_h = heights[len(heights) // 2] if heights else 12
+    thr = max(8.0, med_h * 0.65)
+
+    for w in ws:
+        yc = y_center(w)
+        if current_y is None:
+            current = [w]
+            current_y = yc
+            continue
+
+        if abs(yc - current_y) <= thr:
+            current.append(w)
+            # update running mean y
+            current_y = (current_y * (len(current) - 1) + yc) / len(current)
+        else:
+            lines.append(sorted(current, key=lambda x: x["bbox"][0]))
+            current = [w]
+            current_y = yc
+
+    if current:
+        lines.append(sorted(current, key=lambda x: x["bbox"][0]))
+
+    return lines
 
 
 # -----------------------------
@@ -174,7 +149,7 @@ def get_paddle() -> PaddleOCR:
 
 
 # -----------------------------
-# Router (lightweight)
+# Routing score
 # -----------------------------
 def _score_words(words: List[dict]) -> float:
     if not words:
@@ -196,15 +171,13 @@ def _route_engine(img_rgb: np.ndarray, paddle_words: List[dict], force_engine: s
     if force_engine == "tesseract":
         return "tesseract", run_tesseract(img_rgb)
 
-    # auto
+    # auto: run tesseract only if paddle score is weak (saves time)
     paddle_score = _score_words(paddle_words)
-    # Gate: if Paddle output is OK, don't run Tesseract (saves time)
     if paddle_score >= 0.65 and sum(len((w.get("text") or "")) for w in paddle_words) >= 60:
         return "paddleocr", paddle_words
 
     tess_words = run_tesseract(img_rgb)
     tess_score = _score_words(tess_words)
-
     if tess_score > paddle_score:
         return "tesseract", tess_words
     return "paddleocr", paddle_words
@@ -226,6 +199,7 @@ def _paddle_words_on_image(img_rgb: np.ndarray) -> List[dict]:
     if result is None:
         return words
 
+    # PaddleOCR may return [ [ ... ] ] depending on version
     items = result
     if isinstance(result, list) and len(result) == 1 and isinstance(result[0], list):
         if len(result[0]) == 0:
@@ -334,7 +308,6 @@ def run_ocr(
             out["fields"] = {}
             for pg in out.get("pages", []):
                 pg["tables"] = []
-            # post-clean full text
             out["text"] = normalize_linebreaks(out.get("text") or "")
             return out
 
@@ -346,8 +319,8 @@ def run_ocr(
     page_results: List[PageResult] = []
     debug_info: List[dict] = []
 
-    first_page_img = None
-    engine_used_first = None
+    first_page_img: Optional[np.ndarray] = None
+    engine_used_first: Optional[str] = None
 
     for page_idx, img_rgb in enumerate(imgs):
         # Paddle (for presets + strong bboxes)
@@ -376,18 +349,18 @@ def run_ocr(
                 continue
             bbox = merge_line_bbox(grp)
             conf = compute_line_conf(grp)
-            line_obj = Line(
-                text=txt,
-                conf=conf,
-                bbox=bbox,
-                words=[Word(text=x["text"], conf=float(x["conf"]), bbox=x["bbox"]) for x in grp],
+            lines.append(
+                Line(
+                    text=txt,
+                    conf=conf,
+                    bbox=bbox,
+                    words=[Word(text=x["text"], conf=float(x["conf"]), bbox=x["bbox"]) for x in grp],
+                )
             )
-            lines.append(line_obj)
             page_text_lines.append(txt)
 
         page_text = "\n".join(page_text_lines).strip()
-        pr = PageResult(page_index=page_idx, width=w, height=h, text=page_text, lines=lines)
-        page_results.append(pr)
+        page_results.append(PageResult(page_index=page_idx, width=w, height=h, text=page_text, lines=lines))
 
         if return_debug:
             debug_info.append(
@@ -403,9 +376,8 @@ def run_ocr(
 
     out = to_dict(page_results, meta)
 
-    # Post-process the combined text
+    # Post-process combined + per-page text
     out["text"] = normalize_linebreaks(out.get("text") or "")
-    # Also per-page cleanup
     for pg in out.get("pages", []):
         pg["text"] = normalize_linebreaks(pg.get("text") or "")
 

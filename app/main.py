@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import List
 
 from fastapi import FastAPI, UploadFile, File, Query
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from ocr.pipeline import run_ocr
@@ -14,7 +14,7 @@ from ocr.docx_export import build_docx_from_result
 BASE_DIR = Path(__file__).resolve().parent.parent
 WEB_DIR = BASE_DIR / "web"
 
-app = FastAPI(title="Production OCR Engine (English, PaddleOCR)")
+app = FastAPI(title="Production OCR Engine (English, Multi-Engine)")
 
 app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 
@@ -41,7 +41,7 @@ def styles_css():
 
 @app.get("/favicon.ico")
 def favicon():
-    return JSONResponse(status_code=204, content=None)
+    return Response(status_code=204)
 
 
 def _validate_suffix(filename: str) -> str:
@@ -51,16 +51,25 @@ def _validate_suffix(filename: str) -> str:
     return suffix
 
 
+def _validate_engine(engine: str) -> str:
+    eng = (engine or "auto").lower().strip()
+    if eng not in {"auto", "paddle", "tesseract"}:
+        raise ValueError("engine must be one of: auto, paddle, tesseract")
+    return eng
+
+
 @app.post("/ocr")
 async def ocr_endpoint(
     file: UploadFile = File(...),
     preset: str = Query(default="auto"),
     dpi: int = Query(default=300, ge=72, le=600),
     max_pages: int = Query(default=10, ge=1, le=200),
+    engine: str = Query(default="auto"),
     return_debug: bool = Query(default=False),
 ):
     try:
         _validate_suffix(file.filename or "")
+        engine = _validate_engine(engine)
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
@@ -75,6 +84,7 @@ async def ocr_endpoint(
                 dpi=dpi,
                 max_pages=max_pages,
                 return_debug=return_debug,
+                engine=engine,
             )
             result["file_name"] = file.filename or "upload.bin"
             return JSONResponse(content=result)
@@ -90,10 +100,12 @@ async def ocr_docx_endpoint(
     preset: str = Query(default="auto"),
     dpi: int = Query(default=300, ge=72, le=600),
     max_pages: int = Query(default=10, ge=1, le=200),
+    engine: str = Query(default="auto"),
 ):
     """Returns a .docx with fields, text and detected tables (best-effort)."""
     try:
         _validate_suffix(file.filename or "")
+        engine = _validate_engine(engine)
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
@@ -108,6 +120,7 @@ async def ocr_docx_endpoint(
                 dpi=dpi,
                 max_pages=max_pages,
                 return_debug=False,
+                engine=engine,
             )
             docx_path = Path(td) / "output.docx"
             build_docx_from_result(result, str(docx_path), title=(file.filename or "OCR Output"))
@@ -129,9 +142,15 @@ async def ocr_batch_endpoint(
     preset: str = Query(default="auto"),
     dpi: int = Query(default=300, ge=72, le=600),
     max_pages: int = Query(default=10, ge=1, le=200),
+    engine: str = Query(default="auto"),
     return_debug: bool = Query(default=False),
 ):
     """Batch OCR: returns JSON list. (No zip)"""
+    try:
+        engine = _validate_engine(engine)
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
     results = []
     with tempfile.TemporaryDirectory() as td:
         for f in files:
@@ -151,6 +170,7 @@ async def ocr_batch_endpoint(
                     dpi=dpi,
                     max_pages=max_pages,
                     return_debug=return_debug,
+                    engine=engine,
                 )
                 r["file_name"] = f.filename or "upload.bin"
                 results.append(r)

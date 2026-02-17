@@ -21,6 +21,15 @@
         </div>
 
         <div class="col">
+          <label>Engine</label>
+          <select id="engine">
+            <option value="auto" selected>auto (paddle → fallback tesseract)</option>
+            <option value="paddle">paddle</option>
+            <option value="tesseract">tesseract</option>
+          </select>
+        </div>
+
+        <div class="col">
           <label>Preset</label>
           <select id="preset">
             <option value="auto" selected>auto</option>
@@ -80,7 +89,7 @@
     </section>
 
     <footer>
-      <small>Backend: FastAPI + PaddleOCR. Digital PDFs: text-first extraction (no bboxes/tables).</small>
+      <small>Backend: FastAPI + PaddleOCR + Tesseract fallback. Digital PDFs: text-first extraction (no bboxes/tables).</small>
     </footer>
   </div>
 
