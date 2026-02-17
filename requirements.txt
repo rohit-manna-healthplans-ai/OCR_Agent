@@ -14,3 +14,6 @@ pdfplumber==0.11.4
 paddleocr==2.8.1
 # Windows CPU PaddlePaddle wheels are hosted by Paddle:
 paddlepaddle -f https://www.paddlepaddle.org.cn/whl/windows/mkl/avx/stable.html
+gunicorn==22.0.0
+uvicorn-worker==0.4.0
+requests==2.32.3

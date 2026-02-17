@@ -87,11 +87,15 @@ async function runSingleOCR() {
   const dpi = $("dpi").value;
   const maxPages = $("max_pages").value;
   const debug = $("debug").value;
+  const returnLayout = $("return_layout").value;
+  const llmCorrect = $("llm_correct").value;
+  const returnLayout = $("return_layout").value;
+  const llmCorrect = $("llm_correct").value;
 
   const form = new FormData();
   form.append("file", f);
 
-  const url = `/ocr?engine=${encodeURIComponent(engine)}&preset=${encodeURIComponent(preset)}&dpi=${encodeURIComponent(dpi)}&max_pages=${encodeURIComponent(maxPages)}&return_debug=${encodeURIComponent(debug)}`;
+  const url = `/ocr?engine=${encodeURIComponent(engine)}&preset=${encodeURIComponent(preset)}&dpi=${encodeURIComponent(dpi)}&max_pages=${encodeURIComponent(maxPages)}&return_debug=${encodeURIComponent(debug)}&return_layout=${encodeURIComponent(returnLayout)}&llm_correct=${encodeURIComponent(llmCorrect)}`;
   setStatus("Running OCR...");
   const res = await fetch(url, { method: "POST", body: form });
   const data = await res.json();
@@ -121,11 +125,15 @@ async function runBatchOCR() {
   const dpi = $("dpi").value;
   const maxPages = $("max_pages").value;
   const debug = $("debug").value;
+  const returnLayout = $("return_layout").value;
+  const llmCorrect = $("llm_correct").value;
+  const returnLayout = $("return_layout").value;
+  const llmCorrect = $("llm_correct").value;
 
   const form = new FormData();
   for (const f of files) form.append("files", f);
 
-  const url = `/ocr-batch?engine=${encodeURIComponent(engine)}&preset=${encodeURIComponent(preset)}&dpi=${encodeURIComponent(dpi)}&max_pages=${encodeURIComponent(maxPages)}&return_debug=${encodeURIComponent(debug)}`;
+  const url = `/ocr-batch?engine=${encodeURIComponent(engine)}&preset=${encodeURIComponent(preset)}&dpi=${encodeURIComponent(dpi)}&max_pages=${encodeURIComponent(maxPages)}&return_debug=${encodeURIComponent(debug)}&return_layout=${encodeURIComponent(returnLayout)}&llm_correct=${encodeURIComponent(llmCorrect)}`;
   setStatus("Running batch OCR...");
   const res = await fetch(url, { method: "POST", body: form });
   const data = await res.json();
@@ -148,11 +156,12 @@ async function downloadDocx() {
   const preset = $("preset").value;
   const dpi = $("dpi").value;
   const maxPages = $("max_pages").value;
+  const llmCorrect = $("llm_correct").value;
 
   const form = new FormData();
   form.append("file", f);
 
-  const url = `/ocr-docx?engine=${encodeURIComponent(engine)}&preset=${encodeURIComponent(preset)}&dpi=${encodeURIComponent(dpi)}&max_pages=${encodeURIComponent(maxPages)}`;
+  const url = `/ocr-docx?engine=${encodeURIComponent(engine)}&preset=${encodeURIComponent(preset)}&dpi=${encodeURIComponent(dpi)}&max_pages=${encodeURIComponent(maxPages)}&llm_correct=${encodeURIComponent(llmCorrect)}`;
   setStatus("Building DOCX...");
 
   const res = await fetch(url, { method: "POST", body: form });

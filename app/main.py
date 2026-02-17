@@ -66,6 +66,8 @@ async def ocr_endpoint(
     max_pages: int = Query(default=10, ge=1, le=200),
     engine: str = Query(default="auto"),
     return_debug: bool = Query(default=False),
+    return_layout: bool = Query(default=False),
+    llm_correct: bool = Query(default=False),
 ):
     try:
         _validate_suffix(file.filename or "")
@@ -85,6 +87,8 @@ async def ocr_endpoint(
                 max_pages=max_pages,
                 return_debug=return_debug,
                 engine=engine,
+                return_layout=return_layout,
+                llm_correct=llm_correct,
             )
             result["file_name"] = file.filename or "upload.bin"
             return JSONResponse(content=result)
@@ -101,6 +105,7 @@ async def ocr_docx_endpoint(
     dpi: int = Query(default=300, ge=72, le=600),
     max_pages: int = Query(default=10, ge=1, le=200),
     engine: str = Query(default="auto"),
+    llm_correct: bool = Query(default=False),
 ):
     """Returns a .docx with fields, text and detected tables (best-effort)."""
     try:
@@ -121,6 +126,8 @@ async def ocr_docx_endpoint(
                 max_pages=max_pages,
                 return_debug=False,
                 engine=engine,
+                return_layout=return_layout,
+                llm_correct=llm_correct,
             )
             docx_path = Path(td) / "output.docx"
             build_docx_from_result(result, str(docx_path), title=(file.filename or "OCR Output"))
@@ -144,6 +151,8 @@ async def ocr_batch_endpoint(
     max_pages: int = Query(default=10, ge=1, le=200),
     engine: str = Query(default="auto"),
     return_debug: bool = Query(default=False),
+    return_layout: bool = Query(default=False),
+    llm_correct: bool = Query(default=False),
 ):
     """Batch OCR: returns JSON list. (No zip)"""
     try:
@@ -171,6 +180,8 @@ async def ocr_batch_endpoint(
                     max_pages=max_pages,
                     return_debug=return_debug,
                     engine=engine,
+                                    return_layout=return_layout,
+                    llm_correct=llm_correct,
                 )
                 r["file_name"] = f.filename or "upload.bin"
                 results.append(r)

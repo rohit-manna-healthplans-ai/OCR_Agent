@@ -35,6 +35,8 @@ from ocr.table_detect import detect_tables_from_page  # noqa: E402
 from ocr.tesseract_engine import run_tesseract, run_tesseract_single_char  # noqa: E402
 from ocr.field_extract import extract_fields_from_page  # noqa: E402
 from ocr.analyze import analyze_result  # noqa: E402
+from ocr.layout import analyze_layout  # noqa: E402
+from ocr.llm_correct import maybe_llm_correct  # noqa: E402
 
 
 # -----------------------------
@@ -233,6 +235,8 @@ def run_ocr(
     max_pages: int = 10,
     return_debug: bool = False,
     engine: str = "auto",
+    return_layout: bool = False,
+    llm_correct: bool = False,
 ) -> Dict[str, Any]:
     p = Path(input_path)
     if not p.exists():
@@ -248,6 +252,8 @@ def run_ocr(
         "input_type": "pdf" if suffix == ".pdf" else "image",
         "mkldnn_disabled": True,
         "engine_requested": engine,
+        "return_layout": bool(return_layout),
+        "llm_correct": bool(llm_correct),
     }
 
     # Digital PDF shortcut (text-only)
@@ -264,6 +270,11 @@ def run_ocr(
                 pg["tables"] = []
             out["text"] = normalize_linebreaks(out.get("text") or "")
             out["analysis"] = analyze_result(out)
+            # Optional LLM cleanup (digital PDFs usually already clean)
+            llm = maybe_llm_correct(out.get("text") or "", enabled=llm_correct)
+            out["llm"] = llm
+            if llm.get("enabled"):
+                out["text"] = llm.get("text") or out["text"]
             return out
 
         meta["digital_pdf"] = False
@@ -336,6 +347,20 @@ def run_ocr(
     for pg in out.get("pages", []):
         pg["tables"] = detect_tables_from_page(pg)
 
+    # layout (best-effort) via Paddle PP-Structure
+    if return_layout:
+        for i, pg in enumerate(out.get("pages", [])):
+            try:
+                # We don't have per-page RGB stored; reuse OCR words bboxes only if needed.
+                # For best results, call layout on the rendered image.
+                # We kept first_page_img only; so we run layout on first page and mark others unavailable.
+                if i == 0 and first_page_img is not None:
+                    pg["layout"] = analyze_layout(first_page_img)
+                else:
+                    pg["layout"] = {"available": False, "blocks": []}
+            except Exception:
+                pg["layout"] = {"available": False, "blocks": []}
+
     # fields + boxed sequences (block letters)
     if out.get("pages") and first_page_img is not None:
         def _char_fn(crop_rgb: np.ndarray) -> Dict[str, Any]:
@@ -349,6 +374,14 @@ def run_ocr(
 
     if return_debug:
         out["debug"] = debug_info
+
+    # Optional LLM cleanup (text only)
+    llm = maybe_llm_correct(out.get("text") or "", enabled=llm_correct)
+    out["llm"] = llm
+    if llm.get("enabled"):
+        out["text"] = llm.get("text") or out["text"]
+        # Also normalize again after LLM
+        out["text"] = normalize_linebreaks(out.get("text") or "")
 
     out["analysis"] = analyze_result(out)
     return out
