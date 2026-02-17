@@ -10,14 +10,14 @@
   <div class="wrap">
     <header>
       <h1>OCR Engine (English)</h1>
-      <p class="sub">Upload PDF / Image → get extracted text + structured JSON (bbox + confidence) + extracted fields.</p>
+      <p class="sub">Upload PDF / Image → extracted text + structured JSON + fields + table detection + DOCX export.</p>
     </header>
 
     <section class="card">
       <div class="row">
         <div class="col">
-          <label>File</label>
-          <input id="file" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp" />
+          <label>Files (multi)</label>
+          <input id="files" type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp" />
         </div>
 
         <div class="col">
@@ -50,7 +50,9 @@
       </div>
 
       <div class="actions">
-        <button id="run">Run OCR</button>
+        <button id="runSingle">Run OCR (first file)</button>
+        <button id="runBatch">Run Batch OCR</button>
+        <button id="downloadDocx">Download DOCX (first file)</button>
         <span id="status" class="status"></span>
       </div>
     </section>
@@ -68,17 +70,17 @@
     </section>
 
     <section class="card">
+      <h2>Detected Tables (best-effort)</h2>
+      <div id="tables" class="tables"></div>
+    </section>
+
+    <section class="card">
       <h2>Structured JSON</h2>
       <pre id="json" class="pre"></pre>
     </section>
 
-    <section class="card">
-      <h2>Lines Preview (BBox + Conf)</h2>
-      <div id="lines" class="lines"></div>
-    </section>
-
     <footer>
-      <small>Backend: FastAPI + PaddleOCR. Digital PDFs: text-first extraction (no bboxes).</small>
+      <small>Backend: FastAPI + PaddleOCR. Digital PDFs: text-first extraction (no bboxes/tables).</small>
     </footer>
   </div>
 

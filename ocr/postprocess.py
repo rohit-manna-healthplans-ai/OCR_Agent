@@ -1,101 +1,117 @@
 from __future__ import annotations
 
-from typing import List, Tuple
-import math
+import re
+from typing import Dict, Any, Optional
 
 
-def poly_to_xyxy(poly) -> List[int]:
-    # poly: [[x,y],[x,y],[x,y],[x,y]]
-    xs = [p[0] for p in poly]
-    ys = [p[1] for p in poly]
-    return [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
+# -------------------------
+# Text cleanup
+# -------------------------
+_WS_RE = re.compile(r"\s+")
+_NON_ASCII_RE = re.compile(r"[^\x00-\x7F]+")
+
+# Common OCR confusions (very conservative)
+_OCR_FIXES = [
+    (re.compile(r"\b0([A-Za-z])"), r"O\1"),     # 0A -> OA (sometimes)
+    (re.compile(r"\b([A-Za-z])0\b"), r"\1O"),  # A0 -> AO
+]
 
 
-def bbox_iou(a: List[int], b: List[int]) -> float:
-    ax1, ay1, ax2, ay2 = a
-    bx1, by1, bx2, by2 = b
-    inter_x1 = max(ax1, bx1)
-    inter_y1 = max(ay1, by1)
-    inter_x2 = min(ax2, bx2)
-    inter_y2 = min(ay2, by2)
-    iw = max(0, inter_x2 - inter_x1)
-    ih = max(0, inter_y2 - inter_y1)
-    inter = iw * ih
-    area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
-    area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
-    denom = area_a + area_b - inter
-    return (inter / denom) if denom > 0 else 0.0
+def clean_text(text: str) -> str:
+    """Lightweight cleanup without being too destructive."""
+    if not text:
+        return ""
+    t = text.replace("\u00a0", " ")  # NBSP
+    t = _NON_ASCII_RE.sub(" ", t)
+    t = _WS_RE.sub(" ", t)
+    return t.strip()
 
 
-def group_into_lines(words: List[dict]) -> List[List[dict]]:
-    """
-    words: [{text, conf, bbox=[x1,y1,x2,y2]}]
-    Basic line clustering by y-center proximity.
-    """
-    if not words:
-        return []
-
-    # sort by y then x
-    words = sorted(words, key=lambda w: ((w["bbox"][1] + w["bbox"][3]) / 2.0, w["bbox"][0]))
-
-    lines: List[List[dict]] = []
-    current: List[dict] = []
-    cur_y = None
-
-    for w in words:
-        x1, y1, x2, y2 = w["bbox"]
-        y_center = (y1 + y2) / 2.0
-        height = max(1, y2 - y1)
-
-        if cur_y is None:
-            current = [w]
-            cur_y = y_center
-            continue
-
-        # if y close enough => same line
-        if abs(y_center - cur_y) <= max(10, 0.6 * height):
-            current.append(w)
-            # update running y
-            cur_y = (cur_y * (len(current) - 1) + y_center) / len(current)
-        else:
-            lines.append(sorted(current, key=lambda ww: ww["bbox"][0]))
-            current = [w]
-            cur_y = y_center
-
-    if current:
-        lines.append(sorted(current, key=lambda ww: ww["bbox"][0]))
-
-    return lines
+def normalize_linebreaks(text: str) -> str:
+    """Keep paragraphs but normalize excessive blank lines."""
+    if not text:
+        return ""
+    t = text.replace("\r\n", "\n").replace("\r", "\n")
+    t = "\n".join(line.rstrip() for line in t.split("\n"))
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
 
 
-def merge_line_bbox(words: List[dict]) -> List[int]:
-    xs1 = [w["bbox"][0] for w in words]
-    ys1 = [w["bbox"][1] for w in words]
-    xs2 = [w["bbox"][2] for w in words]
-    ys2 = [w["bbox"][3] for w in words]
-    return [int(min(xs1)), int(min(ys1)), int(max(xs2)), int(max(ys2))]
+# -------------------------
+# Field validation / normalization
+# -------------------------
+PIN_RE = re.compile(r"\b\d{6}\b")                           # India PIN
+ALNUM_ID_RE = re.compile(r"\b[A-Za-z0-9][A-Za-z0-9\-\/]{5,}\b")  # IDs like ABC-123/45
+PAN_RE = re.compile(r"\b[A-Z]{5}\d{4}[A-Z]\b", re.IGNORECASE)     # PAN
+IFSC_RE = re.compile(r"\b[A-Z]{4}0[A-Z0-9]{6}\b", re.IGNORECASE)   # IFSC
+EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+PHONE_RE = re.compile(r"(?:\+91[\s-]?)?(?:0[\s-]?)?\b\d{10}\b")
 
 
-def compute_line_conf(words: List[dict]) -> float:
-    if not words:
-        return 0.0
-    # length-weighted average (simple)
-    total = 0.0
-    weight = 0.0
-    for w in words:
-        t = w["text"].strip()
-        wgt = max(1, len(t))
-        total += float(w["conf"]) * wgt
-        weight += wgt
-    return float(total / max(1.0, weight))
+def _first_match(pattern: re.Pattern, value: str) -> Optional[str]:
+    if not value:
+        return None
+    m = pattern.search(value)
+    return m.group(0) if m else None
 
 
-def line_text(words: List[dict]) -> str:
-    # join with spaces; keep punctuation tight
-    parts = []
-    for w in words:
-        t = w["text"].strip()
-        if not t:
-            continue
-        parts.append(t)
-    return " ".join(parts).strip()
+def _apply_ocr_fixes(value: str) -> str:
+    v = (value or "").strip()
+    for pat, repl in _OCR_FIXES:
+        v = pat.sub(repl, v)
+    return v
+
+
+def validate_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Best-effort validators. Never delete fields; only normalize when confident."""
+    if not fields:
+        return fields
+
+    out: Dict[str, Any] = dict(fields)
+
+    # Generic normalization
+    for k, v in list(out.items()):
+        if isinstance(v, str):
+            out[k] = clean_text(v)
+
+    # Pincode
+    for key in ["Pincode", "Pin", "PIN", "Pin Code", "PIN Code"]:
+        if key in out and isinstance(out[key], str):
+            m = _first_match(PIN_RE, out[key])
+            if m:
+                out["Pincode"] = m
+
+    # Policy / IDs (generic)
+    for key in ["Policy No", "Policy Number", "Certificate No", "SL No/Certificate No", "Company/TPA ID No", "TPA ID"]:
+        if key in out and isinstance(out[key], str):
+            v = _apply_ocr_fixes(out[key]).replace(" ", "")
+            m = _first_match(ALNUM_ID_RE, v)
+            if m:
+                out[key] = m
+
+    # PAN
+    if "PAN" in out and isinstance(out["PAN"], str):
+        m = _first_match(PAN_RE, out["PAN"].upper().replace(" ", ""))
+        if m:
+            out["PAN"] = m.upper()
+
+    # IFSC
+    if "IFSC" in out and isinstance(out["IFSC"], str):
+        m = _first_match(IFSC_RE, out["IFSC"].upper().replace(" ", ""))
+        if m:
+            out["IFSC"] = m.upper()
+
+    # Email
+    if "Email" in out and isinstance(out["Email"], str):
+        m = _first_match(EMAIL_RE, out["Email"])
+        if m:
+            out["Email"] = m
+
+    # Phone/Mobile
+    for key in ["Mobile", "Phone", "Contact", "Mobile No", "Phone No"]:
+        if key in out and isinstance(out[key], str):
+            m = _first_match(PHONE_RE, out[key].replace(" ", ""))
+            if m:
+                out[key] = re.sub(r"\D", "", m)[-10:]
+
+    return out

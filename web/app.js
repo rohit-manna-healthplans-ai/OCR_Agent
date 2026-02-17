@@ -23,12 +23,11 @@ function renderFields(fields) {
 
   const keys = fields ? Object.keys(fields) : [];
   if (!keys.length) {
-    root.innerHTML = `<div class="kv empty">No fields detected (try preset clean_doc/photo/low_light).</div>`;
+    root.innerHTML = `<div class="kv empty">No fields detected.</div>`;
     return;
   }
 
-  // stable order
-  const order = ["Policy No", "SL No/Certificate No", "Company/TPA ID No", "Name", "Address", "City"];
+  const order = ["Policy No", "SL No/Certificate No", "Company/TPA ID No", "Name", "Address", "City", "Pincode"];
   const sorted = [...keys].sort((a, b) => {
     const ia = order.indexOf(a), ib = order.indexOf(b);
     if (ia === -1 && ib === -1) return a.localeCompare(b);
@@ -46,39 +45,42 @@ function renderFields(fields) {
   }
 }
 
-function renderLines(data) {
-  const root = $("lines");
+function renderTables(pages) {
+  const root = $("tables");
   root.innerHTML = "";
 
-  if (!data?.pages?.length) return;
-
-  let shown = 0;
-  for (const p of data.pages) {
-    for (const ln of (p.lines || [])) {
-      if (shown >= 200) break;
+  let found = 0;
+  for (const p of (pages || [])) {
+    for (const tb of (p.tables || [])) {
+      found++;
       const div = document.createElement("div");
-      div.className = "line";
-      div.innerHTML = `
-        <div>${escapeHtml(ln.text)}</div>
-        <div class="meta">conf: ${Number(ln.conf).toFixed(3)} | bbox: [${ln.bbox.join(", ")}] | page: ${p.page_index}</div>
-      `;
+      div.className = "tablecard";
+      const cells = tb.cells || [];
+      let html = `<div class="tmeta">page ${p.page_index} | rows=${tb.n_rows} cols=${tb.n_cols}</div>`;
+      html += `<div class="tgrid">`;
+      html += `<table><tbody>`;
+      for (const row of cells.slice(0, 25)) {
+        html += "<tr>";
+        for (const cell of row.slice(0, 12)) {
+          html += `<td>${escapeHtml(cell || "")}</td>`;
+        }
+        html += "</tr>";
+      }
+      html += `</tbody></table></div>`;
+      div.innerHTML = html;
       root.appendChild(div);
-      shown++;
     }
-    if (shown >= 200) break;
   }
 
-  if (shown === 0) {
-    root.innerHTML = `<div class="line"><div>No line boxes (digital PDF text-first or no detections).</div></div>`;
+  if (!found) {
+    root.innerHTML = `<div class="kv empty">No tables detected (best-effort).</div>`;
   }
 }
 
-$("run").addEventListener("click", async () => {
-  const f = $("file").files?.[0];
-  if (!f) {
-    setStatus("Please select a file.");
-    return;
-  }
+async function runSingleOCR() {
+  const files = $("files").files;
+  if (!files || !files.length) { setStatus("Please select file(s)." ); return; }
+  const f = files[0];
 
   const preset = $("preset").value;
   const dpi = $("dpi").value;
@@ -89,28 +91,85 @@ $("run").addEventListener("click", async () => {
   form.append("file", f);
 
   const url = `/ocr?preset=${encodeURIComponent(preset)}&dpi=${encodeURIComponent(dpi)}&max_pages=${encodeURIComponent(maxPages)}&return_debug=${encodeURIComponent(debug)}`;
-
   setStatus("Running OCR...");
+  const res = await fetch(url, { method: "POST", body: form });
+  const data = await res.json();
 
-  try {
-    const res = await fetch(url, { method: "POST", body: form });
-    const data = await res.json();
+  $("json").textContent = pretty(data);
 
-    if (!res.ok) {
-      $("text").textContent = "";
-      $("json").textContent = pretty(data);
-      renderFields({});
-      renderLines({ pages: [] });
-      setStatus(`Error: ${data.error || res.statusText}`);
-      return;
-    }
-
-    $("text").textContent = data.text || "";
-    $("json").textContent = pretty(data);
-    renderFields(data.fields || {});
-    renderLines(data);
-    setStatus(`Done. Engine=${data?.meta?.engine} | digital_pdf=${data?.meta?.digital_pdf ?? false}`);
-  } catch (e) {
-    setStatus("Failed: " + e.message);
+  if (!res.ok) {
+    $("text").textContent = "";
+    renderFields({});
+    renderTables([]);
+    setStatus(`Error: ${data.error || res.statusText}`);
+    return;
   }
-});
+
+  $("text").textContent = data.text || "";
+  renderFields(data.fields || {});
+  renderTables(data.pages || []);
+  setStatus(`Done: ${data.file_name || f.name}`);
+}
+
+async function runBatchOCR() {
+  const files = $("files").files;
+  if (!files || !files.length) { setStatus("Please select file(s)." ); return; }
+
+  const preset = $("preset").value;
+  const dpi = $("dpi").value;
+  const maxPages = $("max_pages").value;
+  const debug = $("debug").value;
+
+  const form = new FormData();
+  for (const f of files) form.append("files", f);
+
+  const url = `/ocr-batch?preset=${encodeURIComponent(preset)}&dpi=${encodeURIComponent(dpi)}&max_pages=${encodeURIComponent(maxPages)}&return_debug=${encodeURIComponent(debug)}`;
+  setStatus("Running batch OCR...");
+  const res = await fetch(url, { method: "POST", body: form });
+  const data = await res.json();
+  $("json").textContent = pretty(data);
+
+  if (!res.ok) {
+    setStatus(`Batch error: ${data.error || res.statusText}`);
+    return;
+  }
+
+  setStatus(`Batch done. ok=${data.ok}/${data.count}. (See JSON)`);
+}
+
+async function downloadDocx() {
+  const files = $("files").files;
+  if (!files || !files.length) { setStatus("Please select file(s)." ); return; }
+  const f = files[0];
+
+  const preset = $("preset").value;
+  const dpi = $("dpi").value;
+  const maxPages = $("max_pages").value;
+
+  const form = new FormData();
+  form.append("file", f);
+
+  const url = `/ocr-docx?preset=${encodeURIComponent(preset)}&dpi=${encodeURIComponent(dpi)}&max_pages=${encodeURIComponent(maxPages)}`;
+  setStatus("Building DOCX...");
+
+  const res = await fetch(url, { method: "POST", body: form });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    setStatus(`DOCX error: ${data.error || res.statusText}`);
+    return;
+  }
+
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  const fname = (f.name || "ocr").replace(/\.[^/.]+$/, "") + ".docx";
+  a.href = URL.createObjectURL(blob);
+  a.download = fname;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setStatus("DOCX downloaded.");
+}
+
+$("runSingle").addEventListener("click", () => runSingleOCR().catch(e => setStatus("Failed: " + e.message)));
+$("runBatch").addEventListener("click", () => runBatchOCR().catch(e => setStatus("Failed: " + e.message)));
+$("downloadDocx").addEventListener("click", () => downloadDocx().catch(e => setStatus("Failed: " + e.message)));
