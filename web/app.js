@@ -1,4 +1,5 @@
-/* Frontend logic (no bundler). Fixes duplicate variable declarations and keeps buttons clickable. */
+
+/* CLEAN WORKING VERSION - Compatible with current index.html */
 
 function $(id) { return document.getElementById(id); }
 
@@ -11,162 +12,181 @@ function prettyJson(obj) {
   try { return JSON.stringify(obj, null, 2); } catch { return String(obj); }
 }
 
-function buildQuery(params) {
-  const esc = encodeURIComponent;
-  return Object.keys(params)
-    .map(k => `${esc(k)}=${esc(params[k])}`)
-    .join("&");
+function clearOutputs() {
+  if ($("fields")) $("fields").textContent = "";
+  if ($("text")) $("text").textContent = "";
+  if ($("analysis")) $("analysis").textContent = "";
+  if ($("batch_results")) $("batch_results").innerHTML = "";
 }
 
+/* ================= SINGLE OCR ================= */
+
 async function runSingleOCR() {
-  const files = $("files").files;
-  if (!files || files.length === 0) {
+  const fileInput = $("files");
+  if (!fileInput || fileInput.files.length === 0) {
     alert("Please select at least 1 file.");
     return;
   }
 
-  const engine = $("engine").value;
-  const preset = $("preset").value;
-  const dpi = $("dpi").value;
-  const maxPages = $("max_pages").value;
-  const returnLayout = $("return_layout").value;
-  const debug = $("debug").value;
-
-  const qs = buildQuery({
-    engine,
-    preset,
-    dpi,
-    max_pages: maxPages,
-    return_debug: debug,
-    return_layout: returnLayout
-  });
-
-  const url = `/ocr?${qs}`;
+  const engine = $("engine") ? $("engine").value : "auto";
+  const url = `/ocr?engine=${encodeURIComponent(engine)}`;
 
   const fd = new FormData();
-  fd.append("file", files[0]);
+  fd.append("file", fileInput.files[0]);
 
-  $("raw").textContent = "";
-  $("fields").textContent = "";
-  $("text").textContent = "";
-  $("analysis").textContent = "";
+  clearOutputs();
   setStatus("Running OCR...");
 
-  const res = await fetch(url, { method: "POST", body: fd });
-  const data = await res.json();
+  try {
+    const res = await fetch(url, { method: "POST", body: fd });
+    const data = await res.json();
 
-  if (!res.ok) {
-    setStatus("Error");
-    $("raw").textContent = prettyJson(data);
+    if (!res.ok) {
+      setStatus("Error");
+      console.error(data);
+      return;
+    }
+
+    $("fields").textContent = prettyJson(data.fields || {});
+    $("text").textContent = data.text || "";
+    $("analysis").textContent = prettyJson(data.analysis || {});
+    setStatus("Done ✅");
+
+  } catch (err) {
+    console.error(err);
+    setStatus("Error ❌");
+  }
+}
+
+/* ================= BATCH OCR ================= */
+
+function renderBatchResults(data) {
+  const container = $("batch_results");
+  if (!container) return;
+
+  container.innerHTML = "";
+
+  if (!data.results || data.results.length === 0) {
+    container.innerHTML = "<p>No results found.</p>";
     return;
   }
 
-  $("raw").textContent = prettyJson(data);
-  $("fields").textContent = prettyJson(data.fields || {});
-  $("text").textContent = (data.text || "");
-  $("analysis").textContent = prettyJson(data.analysis || {});
-  setStatus("Done ✅");
+  data.results.forEach((doc, index) => {
+    const card = document.createElement("div");
+    card.className = "batch-card";
+
+    const title = document.createElement("h3");
+    title.textContent = doc.filename || `Document ${index + 1}`;
+
+    const meta = document.createElement("div");
+    meta.innerHTML = `
+      <strong>Status:</strong> ${doc.status || "completed"} |
+      <strong>Text Length:</strong> ${(doc.text || "").length}
+    `;
+
+    card.appendChild(title);
+    card.appendChild(meta);
+
+    card.addEventListener("click", () => {
+      $("fields").textContent = prettyJson(doc.fields || {});
+      $("text").textContent = doc.text || "";
+      $("analysis").textContent = prettyJson(doc.analysis || {});
+    });
+
+    container.appendChild(card);
+  });
+
+  // auto show first
+  const first = data.results[0];
+  $("fields").textContent = prettyJson(first.fields || {});
+  $("text").textContent = first.text || "";
+  $("analysis").textContent = prettyJson(first.analysis || {});
 }
 
 async function runBatchOCR() {
-  const files = $("files").files;
-  if (!files || files.length === 0) {
+  const fileInput = $("files");
+  if (!fileInput || fileInput.files.length === 0) {
     alert("Please select at least 1 file.");
     return;
   }
-  if (files.length > 10) {
-    alert("Batch limit is 10 files. Please select max 10 files.");
-    return;
-  }
 
-  const engine = $("engine").value;
-  const preset = $("preset").value;
-  const dpi = $("dpi").value;
-  const maxPages = $("max_pages").value;
-  const returnLayout = $("return_layout").value;
-  const debug = $("debug").value;
-
-  const qs = buildQuery({
-    engine,
-    preset,
-    dpi,
-    max_pages: maxPages,
-    return_debug: debug,
-    return_layout: returnLayout
-  });
-
-  const url = `/ocr-batch?${qs}`;
+  const engine = $("engine") ? $("engine").value : "auto";
+  const url = `/ocr-batch?engine=${encodeURIComponent(engine)}`;
 
   const fd = new FormData();
-  for (const f of files) fd.append("files", f);
-
-  $("raw").textContent = "";
-  $("fields").textContent = "";
-  $("text").textContent = "";
-  $("analysis").textContent = "";
-  setStatus(`Running batch OCR (${files.length} files)...`);
-
-  const res = await fetch(url, { method: "POST", body: fd });
-  const data = await res.json();
-
-  if (!res.ok) {
-    setStatus("Error");
-    $("raw").textContent = prettyJson(data);
-    return;
+  for (const f of fileInput.files) {
+    fd.append("files", f);
   }
 
-  $("raw").textContent = prettyJson(data);
+  clearOutputs();
+  setStatus(`Running batch OCR (${fileInput.files.length} files)...`);
 
-  // show first file highlights
-  const first = (data.results && data.results[0]) ? data.results[0] : null;
-  if (first) {
-    $("fields").textContent = prettyJson(first.fields || {});
-    $("text").textContent = (first.text || "");
-    $("analysis").textContent = prettyJson(first.analysis || {});
+  try {
+    const res = await fetch(url, { method: "POST", body: fd });
+    const data = await res.json();
+
+    if (!res.ok) {
+      setStatus("Error");
+      console.error(data);
+      return;
+    }
+
+    renderBatchResults(data);
+    setStatus("Batch Done ✅");
+
+  } catch (err) {
+    console.error(err);
+    setStatus("Error ❌");
   }
-  setStatus("Batch Done ✅");
 }
+
+/* ================= DOCX ================= */
 
 async function downloadDocx() {
-  const files = $("files").files;
-  if (!files || files.length === 0) {
+  const fileInput = $("files");
+  if (!fileInput || fileInput.files.length === 0) {
     alert("Please select at least 1 file.");
     return;
   }
 
-  const engine = $("engine").value;
-  const preset = $("preset").value;
-  const dpi = $("dpi").value;
-  const maxPages = $("max_pages").value;
-
-  const qs = buildQuery({ engine, preset, dpi, max_pages: maxPages });
-  const url = `/ocr-docx?${qs}`;
+  const engine = $("engine") ? $("engine").value : "auto";
+  const url = `/ocr-docx?engine=${encodeURIComponent(engine)}`;
 
   const fd = new FormData();
-  fd.append("file", files[0]);
+  fd.append("file", fileInput.files[0]);
 
   setStatus("Generating DOCX...");
-  const res = await fetch(url, { method: "POST", body: fd });
 
-  if (!res.ok) {
-    const err = await res.text();
-    alert("DOCX error: " + err);
-    setStatus("Error");
-    return;
+  try {
+    const res = await fetch(url, { method: "POST", body: fd });
+
+    if (!res.ok) {
+      const err = await res.text();
+      alert("DOCX error: " + err);
+      setStatus("Error ❌");
+      return;
+    }
+
+    const blob = await res.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "ocr_result.docx";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+
+    setStatus("DOCX downloaded ✅");
+
+  } catch (err) {
+    console.error(err);
+    setStatus("Error ❌");
   }
-
-  const blob = await res.blob();
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "ocr_result.docx";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setStatus("DOCX downloaded ✅");
 }
 
+/* ================= INIT ================= */
+
 window.addEventListener("DOMContentLoaded", () => {
-  $("run").addEventListener("click", runSingleOCR);
-  $("batch").addEventListener("click", runBatchOCR);
-  $("docx").addEventListener("click", downloadDocx);
+  if ($("run")) $("run").addEventListener("click", runSingleOCR);
+  if ($("batch")) $("batch").addEventListener("click", runBatchOCR);
+  if ($("docx")) $("docx").addEventListener("click", downloadDocx);
 });

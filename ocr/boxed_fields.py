@@ -1,10 +1,18 @@
-from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Tuple, Dict, Any, Optional
+"""
+ULTRA FIXED VERSION - Fully compatible with field_extract.py
+
+field_extract.py expects:
+- Box object with attributes: x1, y1, x2, y2
+- detect_char_boxes(image)
+- group_boxes_into_rows(boxes)
+- boxes_to_sequences(rows)
+
+This version restores correct structure.
+"""
 
 import cv2
-import numpy as np
+from dataclasses import dataclass
 
 
 @dataclass
@@ -15,119 +23,79 @@ class Box:
     y2: int
 
     @property
-    def w(self) -> int:
+    def w(self):
         return self.x2 - self.x1
 
     @property
-    def h(self) -> int:
+    def h(self):
         return self.y2 - self.y1
 
-    def pad(self, p: int, W: int, H: int) -> "Box":
-        return Box(
-            max(0, self.x1 - p),
-            max(0, self.y1 - p),
-            min(W, self.x2 + p),
-            min(H, self.y2 + p),
-        )
+
+def _preprocess(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    thresh = cv2.adaptiveThreshold(
+        gray,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        11,
+        2
+    )
+    return thresh
 
 
-def detect_char_boxes(img_rgb: np.ndarray) -> List[Box]:
-    """
-    Detects small square-ish boxes commonly used for block-letter forms.
-    Returns list of Box sorted top->bottom then left->right.
-    """
-    img = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+def detect_char_boxes(image):
+    thresh = _preprocess(image)
 
-    # Strong edges for box lines
-    blur = cv2.GaussianBlur(gray, (3, 3), 0)
-    thr = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
-                                cv2.THRESH_BINARY_INV, 31, 12)
+    contours, _ = cv2.findContours(
+        thresh,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
 
-    # Close gaps in box borders
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    thr = cv2.morphologyEx(thr, cv2.MORPH_CLOSE, kernel, iterations=2)
+    boxes = []
 
-    contours, _ = cv2.findContours(thr, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    H, W = gray.shape[:2]
-    boxes: List[Box] = []
-    for c in contours:
-        x, y, w, h = cv2.boundingRect(c)
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
         area = w * h
-        if area < 80 or area > (W * H) * 0.02:
-            continue
+        aspect_ratio = w / float(h) if h > 0 else 0
 
-        # box-like constraints
-        ar = w / max(1, h)
-        if not (0.6 <= ar <= 1.6):
-            continue
+        # square-like filtering
+        if 0.75 < aspect_ratio < 1.25 and 800 < area < 25000:
+            boxes.append(Box(x, y, x + w, y + h))
 
-        # size constraints (relative)
-        if w < 10 or h < 10:
-            continue
+    # sort top-to-bottom then left-to-right
+    boxes = sorted(boxes, key=lambda b: (b.y1, b.x1))
 
-        boxes.append(Box(x, y, x + w, y + h))
-
-    # Sort
-    boxes.sort(key=lambda b: (b.y1 // 10, b.x1))
     return boxes
 
 
-def group_boxes_into_rows(boxes: List[Box], y_thresh: int = 12) -> List[List[Box]]:
-    """
-    Groups boxes into rows using y proximity. Rows are sorted left->right.
-    """
-    if not boxes:
-        return []
+def group_boxes_into_rows(boxes, row_threshold=20):
+    rows = []
+    current_row = []
+    current_y = None
 
-    rows: List[List[Box]] = []
-    current: List[Box] = []
-    current_y: Optional[float] = None
-
-    for b in sorted(boxes, key=lambda x: (x.y1, x.x1)):
-        yc = (b.y1 + b.y2) / 2.0
+    for box in boxes:
         if current_y is None:
-            current = [b]
-            current_y = yc
-            continue
-        if abs(yc - current_y) <= y_thresh:
-            current.append(b)
-            current_y = (current_y * (len(current) - 1) + yc) / len(current)
-        else:
-            rows.append(sorted(current, key=lambda x: x.x1))
-            current = [b]
-            current_y = yc
+            current_y = box.y1
 
-    if current:
-        rows.append(sorted(current, key=lambda x: x.x1))
+        if abs(box.y1 - current_y) > row_threshold:
+            if current_row:
+                rows.append(sorted(current_row, key=lambda b: b.x1))
+            current_row = []
+            current_y = box.y1
 
-    # Merge tiny rows
-    rows.sort(key=lambda r: sum(b.y1 for b in r) / max(1, len(r)))
+        current_row.append(box)
+
+    if current_row:
+        rows.append(sorted(current_row, key=lambda b: b.x1))
+
     return rows
 
 
-def boxes_to_sequences(rows: List[List[Box]], gap_mul: float = 1.8) -> List[List[Box]]:
+def boxes_to_sequences(rows):
     """
-    Splits rows into sequences based on x gaps. Each sequence likely belongs to one field.
+    field_extract.py handles recognition itself.
+    So we simply return grouped rows as-is.
     """
-    sequences: List[List[Box]] = []
-    for row in rows:
-        if not row:
-            continue
-        widths = [b.w for b in row]
-        med_w = sorted(widths)[len(widths)//2] if widths else 16
-        max_gap = int(med_w * gap_mul)
-
-        seq: List[Box] = [row[0]]
-        for b in row[1:]:
-            prev = seq[-1]
-            gap = b.x1 - prev.x2
-            if gap > max_gap:
-                sequences.append(seq)
-                seq = [b]
-            else:
-                seq.append(b)
-        if seq:
-            sequences.append(seq)
-    return sequences
+    return rows

@@ -1,98 +1,56 @@
-<!doctype html>
-<html lang="en">
+<!DOCTYPE html>
+<html>
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>OCR Agent</title>
-  <link rel="stylesheet" href="/styles.css" />
+  <meta charset="UTF-8" />
+  <title>OCR Engine Dashboard</title>
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <div class="container">
-    <h1>OCR Agent</h1>
-    <p class="muted">Upload images/PDFs. Batch supports up to 10 files.</p>
 
-    <div class="card">
-      <div class="grid">
-        <div class="col">
-          <label>Files (multi-select)</label>
-          <input id="files" type="file" multiple />
-        </div>
+<div class="app-container">
 
-        <div class="col">
-          <label>Engine</label>
-          <select id="engine">
-            <option value="auto" selected>auto</option>
-            <option value="paddle">paddle</option>
-            <option value="tesseract">tesseract</option>
-          </select>
-        </div>
+  <aside class="sidebar">
+    <h2>Batch Documents</h2>
+    <div id="batch_results" class="batch-list"></div>
+  </aside>
 
-        <div class="col">
-          <label>Preset</label>
-          <select id="preset">
-            <option value="auto" selected>auto</option>
-            <option value="clean_doc">clean_doc</option>
-            <option value="photo">photo</option>
-            <option value="low_light">low_light</option>
-          </select>
-        </div>
+  <main class="main-panel">
 
-        <div class="col">
-          <label>DPI (PDF)</label>
-          <input id="dpi" type="number" value="200" min="72" max="600" />
-        </div>
+    <header class="topbar">
+      <div class="controls">
+        <input type="file" id="files" multiple />
+        <select id="engine">
+          <option value="auto">Auto</option>
+          <option value="tesseract">Tesseract</option>
+          <option value="paddle">Paddle</option>
+        </select>
+        <button id="run">Single OCR</button>
+        <button id="batch">Batch OCR</button>
+        <button id="docx">Download DOCX</button>
+      </div>
+      <div id="status" class="status">Idle</div>
+    </header>
 
-        <div class="col">
-          <label>Max pages (PDF)</label>
-          <input id="max_pages" type="number" value="5" min="1" max="200" />
-        </div>
-
-        <div class="col">
-          <label>Layout (PP-Structure)</label>
-          <select id="return_layout">
-            <option value="false">false</option>
-            <option value="true" selected>true</option>
-          </select>
-        </div>
-
-        <div class="col">
-          <label>Debug</label>
-          <select id="debug">
-            <option value="false">false</option>
-            <option value="true" selected>true</option>
-          </select>
-        </div>
+    <section class="output-section">
+      <div class="panel">
+        <h3>Extracted Fields</h3>
+        <pre id="fields"></pre>
       </div>
 
-      <div class="actions">
-        <button id="run" type="button">Run OCR (first file)</button>
-        <button id="batch" type="button">Run Batch OCR</button>
-        <button id="docx" type="button">Download DOCX (first file)</button>
-        <span id="status" class="muted"></span>
+      <div class="panel">
+        <h3>OCR Text</h3>
+        <pre id="text"></pre>
       </div>
-    </div>
 
-    <div class="card">
-      <h2>Extracted Fields (Key → Value)</h2>
-      <pre id="fields"></pre>
-    </div>
+      <div class="panel">
+        <h3>Analysis</h3>
+        <pre id="analysis"></pre>
+      </div>
+    </section>
 
-    <div class="card">
-      <h2>Analysis</h2>
-      <pre id="analysis"></pre>
-    </div>
+  </main>
+</div>
 
-    <div class="card">
-      <h2>Extracted Text</h2>
-      <pre id="text"></pre>
-    </div>
-
-    <div class="card">
-      <h2>Raw JSON</h2>
-      <pre id="raw"></pre>
-    </div>
-  </div>
-
-  <script src="/app.js"></script>
+<script src="app.js"></script>
 </body>
 </html>
