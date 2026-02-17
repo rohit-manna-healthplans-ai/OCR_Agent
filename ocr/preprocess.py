@@ -5,6 +5,13 @@ import numpy as np
 import cv2
 
 
+# Cached objects (creation is relatively expensive in OpenCV)
+_CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+_SHARPEN_KERNEL = np.array([[0, -1, 0],
+                           [-1, 5, -1],
+                           [0, -1, 0]], dtype=np.float32)
+
+
 def _to_gray(img: np.ndarray) -> np.ndarray:
     if img.ndim == 2:
         return img
@@ -12,8 +19,7 @@ def _to_gray(img: np.ndarray) -> np.ndarray:
 
 
 def _clahe(gray: np.ndarray) -> np.ndarray:
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    return clahe.apply(gray)
+    return _CLAHE.apply(gray)
 
 
 def _adaptive_thresh(gray: np.ndarray) -> np.ndarray:
@@ -27,10 +33,7 @@ def _denoise(gray: np.ndarray) -> np.ndarray:
 
 
 def _sharpen(gray: np.ndarray) -> np.ndarray:
-    kernel = np.array([[0, -1, 0],
-                       [-1, 5, -1],
-                       [0, -1, 0]], dtype=np.float32)
-    return cv2.filter2D(gray, -1, kernel)
+    return cv2.filter2D(gray, -1, _SHARPEN_KERNEL)
 
 
 def _estimate_skew_angle_small(bin_img: np.ndarray) -> float:

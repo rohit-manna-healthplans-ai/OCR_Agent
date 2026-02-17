@@ -51,9 +51,13 @@ async def ocr_endpoint(
 ):
     suffix = Path(file.filename or "upload").suffix.lower()
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
-        tmp.write(content)
         tmp_path = Path(tmp.name)
+        # Stream to disk in chunks to avoid loading the whole file in memory
+        while True:
+            chunk = await file.read(1024 * 1024)  # 1MB
+            if not chunk:
+                break
+            tmp.write(chunk)
 
     try:
         result = run_ocr(

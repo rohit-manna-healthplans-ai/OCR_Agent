@@ -8,13 +8,13 @@ import pdfplumber
 import numpy as np
 
 
-def extract_text_if_digital(pdf_path: str, min_chars_per_page: int = 200) -> Optional[Dict[str, Any]]:
+def extract_text_if_digital(pdf_path: str, min_chars_per_page: int = 200, max_pages: int = 10) -> Optional[Dict[str, Any]]:
     """
     If PDF has selectable text, return it (best accuracy) and skip OCR.
     """
     texts = []
     with pdfplumber.open(pdf_path) as pdf:
-        for i, page in enumerate(pdf.pages):
+        for i, page in enumerate(pdf.pages[:max_pages]):
             t = (page.extract_text() or "").strip()
             texts.append(t)
 

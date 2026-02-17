@@ -12,7 +12,7 @@ Fast + stable pipeline (Windows/Python 3.11):
 
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
 from PIL import Image
@@ -23,7 +23,8 @@ os.environ.setdefault("FLAGS_use_dnnl", "0")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 
-from paddleocr import PaddleOCR  # noqa: E402
+if TYPE_CHECKING:
+    from paddleocr import PaddleOCR
 
 from ocr.pdf_utils import extract_text_if_digital, render_pdf_to_images  # noqa: E402
 from ocr.preprocess import preprocess  # noqa: E402
@@ -95,13 +96,16 @@ def group_into_lines(words: List[dict]) -> List[List[dict]]:
     return lines
 
 
-_OCR_INSTANCE: Optional[PaddleOCR] = None
+_OCR_INSTANCE: Optional[Any] = None
 
 
-def get_paddle() -> PaddleOCR:
+def get_paddle() -> Any:
     global _OCR_INSTANCE
     if _OCR_INSTANCE is not None:
         return _OCR_INSTANCE
+
+    # Lazy import: avoids paying import cost on app startup if OCR endpoint isn't called yet
+    from paddleocr import PaddleOCR
 
     common_kwargs = dict(use_angle_cls=True, lang="en", show_log=False)
 
@@ -232,7 +236,7 @@ def run_ocr(
     }
 
     if suffix == ".pdf":
-        digital = extract_text_if_digital(str(p))
+        digital = extract_text_if_digital(str(p), max_pages=max_pages)
         if digital is not None:
             meta["digital_pdf"] = True
             pages: List[PageResult] = []

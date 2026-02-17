@@ -9,8 +9,15 @@ import numpy as np
 import pytesseract
 
 
+_TESSERACT_CONFIGURED = False
+
+
 def _configure_tesseract_cmd() -> None:
     """
+    global _TESSERACT_CONFIGURED
+    if _TESSERACT_CONFIGURED:
+        return
+
     Make Tesseract discoverable on Windows even if PATH is not refreshed.
     Priority:
       1) env TESSERACT_CMD (full path to tesseract.exe)
@@ -20,6 +27,7 @@ def _configure_tesseract_cmd() -> None:
     env_cmd = os.environ.get("TESSERACT_CMD")
     if env_cmd and Path(env_cmd).exists():
         pytesseract.pytesseract.tesseract_cmd = env_cmd
+        _TESSERACT_CONFIGURED = True
         return
 
     if os.name == "nt":
@@ -30,6 +38,7 @@ def _configure_tesseract_cmd() -> None:
         for c in candidates:
             if Path(c).exists():
                 pytesseract.pytesseract.tesseract_cmd = c
+                _TESSERACT_CONFIGURED = True
                 return
 
 
