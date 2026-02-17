@@ -1,225 +1,133 @@
 from __future__ import annotations
 
-from typing import List, Tuple, Callable, Dict
-import numpy as np
+from dataclasses import dataclass
+from typing import List, Tuple, Dict, Any, Optional
+
 import cv2
+import numpy as np
 
 
-def _to_gray(rgb: np.ndarray) -> np.ndarray:
-    if rgb.ndim == 2:
-        return rgb
-    return cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+@dataclass
+class Box:
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+
+    @property
+    def w(self) -> int:
+        return self.x2 - self.x1
+
+    @property
+    def h(self) -> int:
+        return self.y2 - self.y1
+
+    def pad(self, p: int, W: int, H: int) -> "Box":
+        return Box(
+            max(0, self.x1 - p),
+            max(0, self.y1 - p),
+            min(W, self.x2 + p),
+            min(H, self.y2 + p),
+        )
 
 
-def _binarize(gray: np.ndarray) -> np.ndarray:
+def detect_char_boxes(img_rgb: np.ndarray) -> List[Box]:
+    """
+    Detects small square-ish boxes commonly used for block-letter forms.
+    Returns list of Box sorted top->bottom then left->right.
+    """
+    img = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # Strong edges for box lines
     blur = cv2.GaussianBlur(gray, (3, 3), 0)
-    _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return th
+    thr = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+                                cv2.THRESH_BINARY_INV, 31, 12)
 
-
-def _crop_roi(rgb_img: np.ndarray, roi_xyxy: List[int]) -> Tuple[np.ndarray, Tuple[int, int]]:
-    x1, y1, x2, y2 = roi_xyxy
-    H, W = rgb_img.shape[:2]
-    x1 = max(0, min(W - 1, int(x1)))
-    x2 = max(0, min(W, int(x2)))
-    y1 = max(0, min(H - 1, int(y1)))
-    y2 = max(0, min(H, int(y2)))
-    if x2 <= x1 or y2 <= y1:
-        return rgb_img[0:0, 0:0], (x1, y1)
-    return rgb_img[y1:y2, x1:x2], (x1, y1)
-
-
-def _clean_token(t: str) -> str:
-    t = (t or "").strip()
-    if not t:
-        return ""
-    # Keep mostly alnum and a few common symbols for addresses
-    filtered = "".join(ch for ch in t if ch.isalnum() or ch in "/-.,")
-    return filtered if filtered else t[:1]
-
-
-def read_boxed_sequence(
-    rgb_img: np.ndarray,
-    roi_xyxy: List[int],
-    recognizer_fn: Callable[[np.ndarray], str],
-    max_boxes: int = 120,
-) -> str:
-    """
-    Single-line boxed character reader (left->right).
-    Best for Policy No / IDs / PIN, etc.
-    """
-    roi, _ = _crop_roi(rgb_img, roi_xyxy)
-    if roi.size == 0:
-        return ""
-
-    gray = _to_gray(roi)
-    th = _binarize(gray)
-    inv = 255 - th
-
-    # Find small-ish box-like contours (character cells)
+    # Close gaps in box borders
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    inv = cv2.morphologyEx(inv, cv2.MORPH_CLOSE, kernel, iterations=1)
+    thr = cv2.morphologyEx(thr, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-    contours, _ = cv2.findContours(inv, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    H, W = th.shape[:2]
+    contours, _ = cv2.findContours(thr, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    rects: List[Tuple[int, int, int, int]] = []
+    H, W = gray.shape[:2]
+    boxes: List[Box] = []
     for c in contours:
         x, y, w, h = cv2.boundingRect(c)
-        if w < 16 or h < 16:
-            continue
-        if w > W * 0.45 or h > H * 0.95:
-            continue
         area = w * h
-        if area < 300:
+        if area < 80 or area > (W * H) * 0.02:
             continue
-        ar = w / float(h)
-        if ar < 0.35 or ar > 3.0:
+
+        # box-like constraints
+        ar = w / max(1, h)
+        if not (0.6 <= ar <= 1.6):
             continue
-        rects.append((x, y, w, h))
 
-    if not rects:
-        return ""
-
-    rects.sort(key=lambda r: r[0])
-    rects = rects[:max_boxes]
-
-    chars: List[str] = []
-    for x, y, w, h in rects:
-        # inner crop
-        pad = 2
-        x1, y1 = max(0, x + pad), max(0, y + pad)
-        x2, y2 = min(W, x + w - pad), min(H, y + h - pad)
-        cell = th[y1:y2, x1:x2]
-        if cell.size == 0:
+        # size constraints (relative)
+        if w < 10 or h < 10:
             continue
-        cell_rgb = cv2.cvtColor(cell, cv2.COLOR_GRAY2RGB)
-        t = _clean_token(recognizer_fn(cell_rgb))
-        if not t:
-            continue
-        # keep first char for sequences
-        chars.append(t[0])
 
-    return "".join(chars).replace(" ", "")
+        boxes.append(Box(x, y, x + w, y + h))
+
+    # Sort
+    boxes.sort(key=lambda b: (b.y1 // 10, b.x1))
+    return boxes
 
 
-def read_boxed_grid(
-    rgb_img: np.ndarray,
-    roi_xyxy: List[int],
-    recognizer_fn: Callable[[np.ndarray], str],
-    max_rows: int = 6,
-    max_cols: int = 60,
-) -> str:
+def group_boxes_into_rows(boxes: List[Box], y_thresh: int = 12) -> List[List[Box]]:
     """
-    Multi-row boxed grid reader (like Address blocks).
-    Detects grid lines via morphology, extracts cells, groups into rows, OCR per cell.
-    Returns lines joined with '\\n'.
+    Groups boxes into rows using y proximity. Rows are sorted left->right.
     """
-    roi, _ = _crop_roi(rgb_img, roi_xyxy)
-    if roi.size == 0:
-        return ""
+    if not boxes:
+        return []
 
-    gray = _to_gray(roi)
-    th = _binarize(gray)
+    rows: List[List[Box]] = []
+    current: List[Box] = []
+    current_y: Optional[float] = None
 
-    # Invert for line detection: lines become white
-    inv = 255 - th
-    H, W = inv.shape[:2]
-
-    # Detect vertical lines
-    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(10, H // 20)))
-    vertical = cv2.erode(inv, v_kernel, iterations=1)
-    vertical = cv2.dilate(vertical, v_kernel, iterations=2)
-
-    # Detect horizontal lines
-    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(10, W // 20), 1))
-    horizontal = cv2.erode(inv, h_kernel, iterations=1)
-    horizontal = cv2.dilate(horizontal, h_kernel, iterations=2)
-
-    grid = cv2.bitwise_or(vertical, horizontal)
-    grid = cv2.morphologyEx(grid, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=1)
-
-    # Find cell candidates by contouring the grid
-    contours, _ = cv2.findContours(grid, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-
-    cells: List[Tuple[int, int, int, int]] = []
-    for c in contours:
-        x, y, w, h = cv2.boundingRect(c)
-        # Cells in forms are typically small rectangles
-        if w < 14 or h < 14:
+    for b in sorted(boxes, key=lambda x: (x.y1, x.x1)):
+        yc = (b.y1 + b.y2) / 2.0
+        if current_y is None:
+            current = [b]
+            current_y = yc
             continue
-        if w > W * 0.5 or h > H * 0.5:
-            continue
-        area = w * h
-        if area < 250:
-            continue
-        ar = w / float(h)
-        if ar < 0.35 or ar > 4.0:
-            continue
-        cells.append((x, y, w, h))
-
-    if not cells:
-        return ""
-
-    # De-duplicate very similar cells
-    cells.sort(key=lambda r: (r[1], r[0]))
-    dedup: List[Tuple[int, int, int, int]] = []
-    for r in cells:
-        if not dedup:
-            dedup.append(r)
-            continue
-        x, y, w, h = r
-        px, py, pw, ph = dedup[-1]
-        if abs(x - px) < 4 and abs(y - py) < 4 and abs(w - pw) < 6 and abs(h - ph) < 6:
-            if w * h > pw * ph:
-                dedup[-1] = r
+        if abs(yc - current_y) <= y_thresh:
+            current.append(b)
+            current_y = (current_y * (len(current) - 1) + yc) / len(current)
         else:
-            dedup.append(r)
-    cells = dedup
+            rows.append(sorted(current, key=lambda x: x.x1))
+            current = [b]
+            current_y = yc
 
-    # Group into rows by y
-    rows: List[List[Tuple[int, int, int, int]]] = []
-    for r in cells:
-        x, y, w, h = r
-        cy = y + h / 2.0
-        placed = False
-        for row in rows:
-            rx, ry, rw, rh = row[0]
-            rcy = ry + rh / 2.0
-            if abs(cy - rcy) < max(10, rh * 0.6):
-                row.append(r)
-                placed = True
-                break
-        if not placed:
-            rows.append([r])
+    if current:
+        rows.append(sorted(current, key=lambda x: x.x1))
 
-    # Sort rows top->bottom and keep max_rows
-    rows.sort(key=lambda row: row[0][1])
-    rows = rows[:max_rows]
+    # Merge tiny rows
+    rows.sort(key=lambda r: sum(b.y1 for b in r) / max(1, len(r)))
+    return rows
 
-    out_lines: List[str] = []
+
+def boxes_to_sequences(rows: List[List[Box]], gap_mul: float = 1.8) -> List[List[Box]]:
+    """
+    Splits rows into sequences based on x gaps. Each sequence likely belongs to one field.
+    """
+    sequences: List[List[Box]] = []
     for row in rows:
-        row.sort(key=lambda r: r[0])
-        row = row[:max_cols]
-        chars: List[str] = []
-        for x, y, w, h in row:
-            pad = 2
-            x1, y1 = max(0, x + pad), max(0, y + pad)
-            x2, y2 = min(W, x + w - pad), min(H, y + h - pad)
-            cell = th[y1:y2, x1:x2]
-            if cell.size == 0:
-                continue
-            cell_rgb = cv2.cvtColor(cell, cv2.COLOR_GRAY2RGB)
-            t = _clean_token(recognizer_fn(cell_rgb))
-            if not t:
-                chars.append("")
-                continue
-            chars.append(t[0])
+        if not row:
+            continue
+        widths = [b.w for b in row]
+        med_w = sorted(widths)[len(widths)//2] if widths else 16
+        max_gap = int(med_w * gap_mul)
 
-        # Collapse empties and build a readable line
-        line = "".join(chars).strip()
-        line = line.replace("  ", " ")
-        if line:
-            out_lines.append(line)
-
-    return "\n".join(out_lines).strip()
+        seq: List[Box] = [row[0]]
+        for b in row[1:]:
+            prev = seq[-1]
+            gap = b.x1 - prev.x2
+            if gap > max_gap:
+                sequences.append(seq)
+                seq = [b]
+            else:
+                seq.append(b)
+        if seq:
+            sequences.append(seq)
+    return sequences
