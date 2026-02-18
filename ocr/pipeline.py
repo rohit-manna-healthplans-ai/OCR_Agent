@@ -73,13 +73,30 @@ def line_text(words: List[dict]) -> str:
 
 
 def group_into_lines(words: List[dict]) -> List[List[dict]]:
+    """Group word boxes into reading-order lines (production-safe).
+
+    Fixes segmentation issues caused by fixed pixel thresholds by using
+    an adaptive y-threshold based on median word height.
+    """
     if not words:
         return []
 
     def y_center(w: dict) -> float:
         return (w["bbox"][1] + w["bbox"][3]) / 2.0
 
-    ws = sorted(words, key=lambda w: (y_center(w), w["bbox"][0]))
+    def height(w: dict) -> float:
+        return float(max(1, w["bbox"][3] - w["bbox"][1]))
+
+    ws = [w for w in words if w.get("bbox") and len(w["bbox"]) == 4 and (w.get("text") or "").strip()]
+    if not ws:
+        return []
+
+    # median height -> adaptive line tolerance
+    hs = sorted(height(w) for w in ws)
+    med_h = hs[len(hs) // 2]
+    y_tol = max(12.0, min(0.75 * med_h, 28.0))  # clamp for stability
+
+    ws = sorted(ws, key=lambda w: (y_center(w), w["bbox"][0]))
     lines: List[List[dict]] = []
     current: List[dict] = []
     current_y: Optional[float] = None
@@ -90,8 +107,11 @@ def group_into_lines(words: List[dict]) -> List[List[dict]]:
             current = [w]
             current_y = yc
             continue
-        if abs(yc - current_y) <= 12:
+
+        # Update current_y slowly to follow drift (scanned docs)
+        if abs(yc - current_y) <= y_tol:
             current.append(w)
+            current_y = (0.7 * current_y) + (0.3 * yc)
         else:
             lines.append(sorted(current, key=lambda x: x["bbox"][0]))
             current = [w]
@@ -99,6 +119,26 @@ def group_into_lines(words: List[dict]) -> List[List[dict]]:
 
     if current:
         lines.append(sorted(current, key=lambda x: x["bbox"][0]))
+
+    # Optional: merge very small "orphan" lines into nearest (reduces over-segmentation)
+    if len(lines) >= 2:
+        merged: List[List[dict]] = []
+        for ln in lines:
+            if not merged:
+                merged.append(ln)
+                continue
+            if len(ln) == 1:
+                prev = merged[-1]
+                prev_h = float(max(1, prev[-1]["bbox"][3] - prev[-1]["bbox"][1]))
+                ln_h = float(max(1, ln[0]["bbox"][3] - ln[0]["bbox"][1]))
+                # if heights similar and y-gap small, merge
+                gap = abs(y_center(ln[0]) - y_center(prev[-1]))
+                if gap <= max(y_tol, 0.9 * max(prev_h, ln_h)):
+                    merged[-1] = prev + ln
+                    continue
+            merged.append(ln)
+        lines = [sorted(l, key=lambda x: x["bbox"][0]) for l in merged]
+
     return lines
 
 
@@ -175,7 +215,14 @@ def _score_words(words: List[dict]) -> float:
 
 
 def _ocr_best_of_presets(img_rgb: np.ndarray, preset: str) -> Tuple[List[dict], str, np.ndarray]:
-    presets = ["clean_doc"] if preset == "auto" else [preset]
+    """Run Paddle on multiple preprocessing presets and keep the best.
+
+    Production fix:
+    - When preset=="auto", try several presets instead of only "clean_doc".
+      UI screenshots often lose thin/anti-aliased text with aggressive binarization.
+      Trying a "screen" preset (no binarization) improves recall.
+    """
+    presets = ["clean_doc", "screen", "photo", "low_light"] if preset == "auto" else [preset]
     candidates = []
     for pr in presets:
         proc, used = preprocess(img_rgb, preset=pr)
@@ -197,7 +244,15 @@ def _route_engine(img_rgb: np.ndarray, paddle_words: List[dict], force_engine: s
     if score >= 0.35 and len(paddle_words) >= 15:
         return "paddle", paddle_words
 
-    return "tesseract", run_tesseract(img_rgb)
+    # Default to Tesseract for short/low-score outputs, but protect against
+    # the "empty region" failure mode common in UI screenshots.
+    tess_words = run_tesseract(img_rgb)
+    if tess_words:
+        return "tesseract", tess_words
+    # If Tesseract returns nothing but Paddle found something, keep Paddle.
+    if paddle_words:
+        return "paddle", paddle_words
+    return "tesseract", tess_words
 
 
 def _uppercase_ratio(text: str) -> float:
@@ -335,6 +390,13 @@ def _run_screen_ocr(img_rgb: np.ndarray, preset: str, engine: str, return_layout
     combined_parts: List[str] = []
     debug_info: List[dict] = []
 
+    def _has_meaningful_text(s: str) -> bool:
+        s = (s or "").strip()
+        if not s:
+            return False
+        # must contain at least one alphanumeric character
+        return any(ch.isalnum() for ch in s)
+
     for idx, r in enumerate(regions):
         name = r["name"]
         bbox = r["bbox"]
@@ -350,7 +412,9 @@ def _run_screen_ocr(img_rgb: np.ndarray, preset: str, engine: str, return_layout
         region_page["text_markdown"] = _build_markdown_for_page(region_page)
 
         # region tables
-        region_tables = detect_tables_from_page(region_page, region_name=name)
+        # IMPORTANT: use the same processed image that OCR ran on.
+        # This keeps table detection aligned and avoids NameError bugs.
+        region_tables = detect_tables_from_page(region_page, region_name=name, img_rgb=used_img)
         region_page["tables"] = region_tables
 
         # layout only for main region (fast, useful)
@@ -383,8 +447,11 @@ def _run_screen_ocr(img_rgb: np.ndarray, preset: str, engine: str, return_layout
             })
 
         # Build combined markdown in screen order
-        combined_parts.append(f"## [{name.upper()}]")
-        combined_parts.append(region_page.get("text_markdown") or "")
+        # Only show a region section when it actually contains meaningful text.
+        # This prevents confusing empty [TOPBAR]/[FOOTER]/[SIDEBAR] blocks.
+        if _has_meaningful_text(region_page.get("text") or ""):
+            combined_parts.append(f"## [{name.upper()}]")
+            combined_parts.append(region_page.get("text_markdown") or "")
 
     # Build a synthetic "page 0" that represents the whole screen in text form
     combined_md = "\n".join([p for p in combined_parts if p]).strip()
@@ -555,7 +622,7 @@ def run_ocr(
             pg["text_markdown"] = _build_markdown_for_page(pg)
 
         for pg in out.get("pages", []):
-            pg["tables"] = detect_tables_from_page(pg, region_name="main")
+            pg["tables"] = detect_tables_from_page(pg, region_name="main", img_rgb=None)
 
         if return_layout:
             for i, pg in enumerate(out.get("pages", [])):
@@ -614,10 +681,16 @@ def run_ocr(
     out = to_dict(page_results, meta)
     out["text"] = normalize_linebreaks(out.get("text") or "")
 
+    # Use the actual processed image for table detection if available.
+    # Avoid relying on variables that may not exist in this scope.
+    used_img_local = locals().get("used_img", None)
+    img_rgb_local = locals().get("img_rgb", None)
+    image_for_tables = used_img_local if used_img_local is not None else img_rgb_local
+
     for pg in out.get("pages", []):
         pg["text"] = normalize_linebreaks(pg.get("text") or "")
         pg["text_markdown"] = _build_markdown_for_page(pg)
-        pg["tables"] = detect_tables_from_page(pg, region_name="main")
+        pg["tables"] = detect_tables_from_page(pg, region_name="main", img_rgb=image_for_tables)
 
     if return_layout:
         out["pages"][0]["layout"] = analyze_layout(used_img)

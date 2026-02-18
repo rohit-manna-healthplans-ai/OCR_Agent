@@ -5,6 +5,39 @@ import numpy as np
 import cv2
 
 
+def normalize_image(img_rgb: np.ndarray) -> np.ndarray:
+    """Production-stable normalization.
+    - Ensures 3-channel RGB
+    - Upscales very small images (helps segmentation + tables)
+    - Light contrast equalization on luminance
+    """
+    if img_rgb is None:
+        return img_rgb
+    if img_rgb.ndim == 2:
+        img_rgb = cv2.cvtColor(img_rgb, cv2.COLOR_GRAY2RGB)
+    # ensure dtype uint8
+    if img_rgb.dtype != np.uint8:
+        img_rgb = np.clip(img_rgb, 0, 255).astype(np.uint8)
+
+    h, w = img_rgb.shape[:2]
+    min_side = min(h, w)
+    if min_side < 1000:
+        scale = 1000.0 / float(min_side)
+        img_rgb = cv2.resize(img_rgb, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+
+    # luminance equalization (mild)
+    try:
+        lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2LAB)
+        l, a, b = cv2.split(lab)
+        l = cv2.equalizeHist(l)
+        lab = cv2.merge((l, a, b))
+        img_rgb = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+    except Exception:
+        pass
+
+    return img_rgb
+
+
 # Cached objects (creation is relatively expensive in OpenCV)
 _CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 _SHARPEN_KERNEL = np.array([[0, -1, 0],
@@ -16,6 +49,27 @@ def _to_gray(img: np.ndarray) -> np.ndarray:
     if img.ndim == 2:
         return img
     return cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+
+
+def _maybe_invert_for_dark_ui(img_rgb: np.ndarray) -> np.ndarray:
+    """Improve OCR on dark-theme screenshots.
+
+    Paddle/Tesseract models are typically strongest on dark text over light background.
+    For UI screenshots with light text on dark background, we invert *only when likely*.
+
+    Heuristic (fast + stable):
+    - overall image is dark (low mean)
+    - but there are enough very bright pixels (UI text/icons)
+    """
+    try:
+        gray = _to_gray(img_rgb)
+        mean = float(gray.mean())
+        bright_ratio = float((gray >= 210).mean())
+        if mean < 115.0 and bright_ratio >= 0.002:
+            return 255 - img_rgb
+    except Exception:
+        pass
+    return img_rgb
 
 
 def _clahe(gray: np.ndarray) -> np.ndarray:
@@ -82,8 +136,13 @@ def preprocess(img_rgb: np.ndarray, preset: str = "auto") -> Tuple[np.ndarray, s
     - deskew is clamped to small angles to avoid 90-degree rotations on forms
     - mild upscale added for boxed characters
     """
+    img_rgb = normalize_image(img_rgb)
+    # Key production fix: dark-theme screenshots (light text on dark bg) -> invert for OCR.
+    img_rgb = _maybe_invert_for_dark_ui(img_rgb)
+
     preset = (preset or "auto").lower().strip()
-    if preset not in {"auto", "clean_doc", "photo", "low_light"}:
+    # "screen" is optimized for UI screenshots (no aggressive binarization).
+    if preset not in {"auto", "clean_doc", "photo", "low_light", "screen"}:
         preset = "auto"
 
     gray = _to_gray(img_rgb)
@@ -110,6 +169,29 @@ def preprocess(img_rgb: np.ndarray, preset: str = "auto") -> Tuple[np.ndarray, s
         if max(h, w) < 2200:
             out = _upscale_rgb(out, 1.5)
 
+        return out, used
+
+    if used == "screen":
+        # UI/screenshot preset: keep anti-aliased text, avoid binary thresholding.
+        # Steps:
+        # - mild denoise + CLAHE on luminance
+        # - optional small-angle deskew (using a temporary binary)
+        # - upscale for OCR
+        g = _denoise(gray)
+        g = _clahe(g)
+
+        # deskew estimation needs a binary, but we don't return the binary image.
+        try:
+            b = _adaptive_thresh(g)
+            angle = _estimate_skew_angle_small(b)
+        except Exception:
+            angle = 0.0
+
+        out = _rotate(img_rgb, angle)
+        h, w = out.shape[:2]
+        # UI text can be small; upscale more aggressively.
+        scale = 2.0 if max(h, w) < 2200 else 1.5
+        out = _upscale_rgb(out, scale)
         return out, used
 
     if used == "photo":

@@ -14,6 +14,33 @@ Fixes:
 from typing import List, Dict, Any, Optional
 import re
 
+# Optional dependency (part of paddleocr): PPStructure for table structure
+try:
+    from paddleocr import PPStructure  # type: ignore
+except Exception:
+    PPStructure = None  # type: ignore
+
+_PP_TABLE_ENGINE: Optional[Any] = None
+
+def _get_pp_table_engine() -> Optional[Any]:
+    global _PP_TABLE_ENGINE
+    if _PP_TABLE_ENGINE is not None:
+        return _PP_TABLE_ENGINE
+    if PPStructure is None:
+        return None
+    # Try to enable table + layout + ocr (signatures differ across versions)
+    try:
+        _PP_TABLE_ENGINE = PPStructure(layout=True, table=True, ocr=True, show_log=False, lang="en")
+    except TypeError:
+        try:
+            _PP_TABLE_ENGINE = PPStructure(layout=True, table=True, ocr=True, show_log=False)
+        except TypeError:
+            try:
+                _PP_TABLE_ENGINE = PPStructure(show_log=False, lang="en")
+            except TypeError:
+                _PP_TABLE_ENGINE = PPStructure(show_log=False)
+    return _PP_TABLE_ENGINE
+
 
 _TASKBAR_TOKENS = {
     "qsearch", "eng", "in", "mostly-clear", "mostly clear", "am", "pm",
@@ -89,6 +116,28 @@ def _cluster_rows(words: List[dict], y_eps: int = 12) -> List[Dict[str, Any]]:
     return rows
 
 
+def _estimate_y_eps(words: List[dict]) -> float:
+    """Estimate a good row-clustering tolerance from OCR word heights.
+
+    The previous version referenced this function but it was missing, which could
+    crash table detection. We use a stable median-based estimate.
+    """
+    hs: List[int] = []
+    for w in words or []:
+        bbox = w.get("bbox")
+        if not bbox or len(bbox) != 4:
+            continue
+        h = int(max(1, bbox[3] - bbox[1]))
+        if h > 0:
+            hs.append(h)
+    if not hs:
+        return 12.0
+    hs.sort()
+    med = float(hs[len(hs) // 2])
+    # Typical line grouping tolerance is ~0.6-0.9 of word height.
+    return max(10.0, min(0.75 * med, 28.0))
+
+
 def _cluster_columns(x_positions: List[float], x_eps: int = 34) -> List[float]:
     xs = sorted(x_positions)
     cols = []
@@ -131,7 +180,7 @@ def _table_kind(grid: List[List[str]]) -> str:
     return "table" if (r >= 3 and c >= 2) else "noise"
 
 
-def detect_tables_from_page(page: Dict[str, Any], region_name: Optional[str] = None) -> List[Dict[str, Any]]:
+def detect_tables_from_page(page: Dict[str, Any], region_name: Optional[str] = None, img_rgb: Optional[Any] = None) -> List[Dict[str, Any]]:
     """
     Backward compatible signature: existing calls work.
     Optional region_name helps avoid detecting tables in topbar/footer.
@@ -148,7 +197,7 @@ def detect_tables_from_page(page: Dict[str, Any], region_name: Optional[str] = N
     if len(words) < 10:
         return []
 
-    rows = _cluster_rows(words, y_eps=12)
+    rows = _cluster_rows(words, y_eps=max(12, int(_estimate_y_eps(words))))
     candidate_rows = [r for r in rows if len(r["words"]) >= 3]
     if not candidate_rows:
         return []
@@ -201,5 +250,32 @@ def detect_tables_from_page(page: Dict[str, Any], region_name: Optional[str] = N
             "col_count": len(columns),
             "kind": kind,
         })
+
+    
+    # If heuristics failed, try PPStructure table extraction (requires image)
+    if not results and img_rgb is not None:
+        eng = _get_pp_table_engine()
+        if eng is not None:
+            try:
+                pp_res = eng(img_rgb)
+            except Exception:
+                pp_res = []
+            for blk in pp_res or []:
+                btype = (blk.get("type") or blk.get("res", {}).get("type") or "").lower()
+                if "table" not in btype:
+                    # Some versions label as "table" in type, others in res keys
+                    if blk.get("type") != "table":
+                        continue
+                bbox = blk.get("bbox") or blk.get("res", {}).get("bbox")
+                html = blk.get("res", {}).get("html") or blk.get("html")
+                if bbox and isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                    results.append({
+                        "kind": "table",
+                        "bbox": [int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])],
+                        "rows": [],
+                        "confidence": 0.85,
+                        "method": "ppstructure",
+                        "html": html,
+                    })
 
     return results
