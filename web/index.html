@@ -1,71 +1,154 @@
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>OCR Engine Dashboard</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OCR Viewer</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-
-<div class="app-container">
-
-  <aside class="sidebar">
-    <div class="sidebar-header">
-      <h2>Batch Documents</h2>
-      <div id="status" class="status">Idle</div>
-    </div>
-    <div id="batch_results" class="batch-list"></div>
-  </aside>
-
-  <main class="main-panel">
-
-    <header class="topbar">
-      <div class="controls">
-        <input type="file" id="files" multiple />
-        <select id="engine">
-          <option value="auto">Auto</option>
-          <option value="tesseract">Tesseract</option>
-          <option value="paddle">Paddle</option>
-        </select>
-        <button id="run">Single OCR</button>
-        <button id="batch">Batch OCR</button>
-        <button id="docx">Download DOCX</button>
-        <button id="json_download">Download JSON</button>
-      </div>
-    </header>
-
-    <section class="output-section">
-      <div class="panel">
-        <div class="panel-title">Extracted Fields</div>
-        <pre id="fields"></pre>
-      </div>
-
-      <div class="panel panel-wide">
-        <div class="panel-title">OCR Text</div>
-        <pre id="text"></pre>
-      </div>
-
-      <div class="panel panel-wide">
-        <div class="panel-title">Tables</div>
-        <div id="tables" class="tables-wrap">
-          <div class="muted">No tables extracted yet.</div>
+  <div class="layout">
+    <aside class="side">
+      <div class="side__brand">
+        <div>
+          <div class="brand__title">OCR Viewer</div>
+          <div class="brand__sub">FastAPI • PaddleOCR • Tesseract</div>
         </div>
+        <div id="status" class="pill">Idle</div>
       </div>
 
-      <div class="panel panel-wide">
-        <div class="panel-title">JSON</div>
-        <pre id="json"></pre>
+      <div class="card">
+        <div class="card__title">Upload</div>
+        <div class="row">
+          <input id="files" type="file" multiple />
+        </div>
+        <div class="row row--2">
+          <select id="engine" aria-label="Engine">
+            <option value="auto">Auto</option>
+            <option value="paddle">Paddle</option>
+            <option value="tesseract">Tesseract</option>
+          </select>
+          <button id="run" type="button">Single OCR</button>
+        </div>
+        <div class="row row--2">
+          <button id="batch" type="button" class="ghost">Batch OCR</button>
+          <button id="docx" type="button" class="ghost">DOCX</button>
+        </div>
+        <div class="row row--2">
+          <button id="json_download" type="button" class="ghost">Download JSON</button>
+          <button id="clear" type="button" class="danger ghost">Clear</button>
+        </div>
+        <div class="hint">Tip: Batch list se document select karo. Tabs me output dekho.</div>
       </div>
 
-      <div class="panel">
-        <div class="panel-title">Analysis</div>
-        <pre id="analysis"></pre>
+      <div class="card">
+        <div class="card__title">Batch Documents</div>
+        <div id="batch_results" class="batch"></div>
       </div>
-    </section>
+    </aside>
 
-  </main>
-</div>
+    <main class="main">
+      <header class="top">
+        <div class="top__left">
+          <div id="doc_title" class="doc__title">No document loaded</div>
+          <div id="doc_meta" class="doc__meta"></div>
+        </div>
+        <div class="top__right">
+          <input id="search" class="search" placeholder="Search in current view…" />
+        </div>
+      </header>
 
-<script src="app.js"></script>
+      <nav class="tabs" aria-label="Output tabs">
+        <button class="tab is-active" data-tab="page" type="button">Page View</button>
+        <button class="tab" data-tab="fields" type="button">Fields</button>
+        <button class="tab" data-tab="text" type="button">Text</button>
+        <button class="tab" data-tab="tables" type="button">Tables</button>
+        <button class="tab" data-tab="human" type="button">Human JSON</button>
+        <button class="tab" data-tab="json" type="button">Raw JSON</button>
+        <button class="tab" data-tab="analysis" type="button">Analysis</button>
+      </nav>
+
+      <section class="content">
+        <section class="panel" id="panel-page" data-panel="page">
+          <div class="panel__head">
+            <div class="panel__title">Page View (Headings/Bold)</div>
+            <div class="panel__actions">
+              <select id="page_select" class="mini ghost" aria-label="Select page"></select>
+              <button class="mini ghost" data-copy="page_md" type="button">Copy MD</button>
+            </div>
+          </div>
+          <div class="split">
+            <div class="split__col">
+              <div class="split__label">Rendered</div>
+              <div id="page_render" class="render"></div>
+            </div>
+            <div class="split__col">
+              <div class="split__label">Markdown</div>
+              <pre id="page_md" class="pre"></pre>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" id="panel-fields" data-panel="fields" hidden>
+          <div class="panel__head">
+            <div class="panel__title">Extracted Fields</div>
+            <div class="panel__actions">
+              <button class="mini ghost" data-copy="fields" type="button">Copy</button>
+            </div>
+          </div>
+          <pre id="fields" class="pre"></pre>
+        </section>
+
+        <section class="panel" id="panel-text" data-panel="text" hidden>
+          <div class="panel__head">
+            <div class="panel__title">OCR Text (Plain)</div>
+            <div class="panel__actions">
+              <button class="mini ghost" data-copy="text" type="button">Copy</button>
+            </div>
+          </div>
+          <pre id="text" class="pre"></pre>
+        </section>
+
+        <section class="panel" id="panel-tables" data-panel="tables" hidden>
+          <div class="panel__head">
+            <div class="panel__title">Tables</div>
+          </div>
+          <div id="tables" class="tables"></div>
+        </section>
+
+        <section class="panel" id="panel-human" data-panel="human" hidden>
+          <div class="panel__head">
+            <div class="panel__title">Human Readable JSON</div>
+            <div class="panel__actions">
+              <button class="mini ghost" data-copy="human" type="button">Copy</button>
+            </div>
+          </div>
+          <pre id="human" class="pre"></pre>
+        </section>
+
+        <section class="panel" id="panel-json" data-panel="json" hidden>
+          <div class="panel__head">
+            <div class="panel__title">Raw JSON</div>
+            <div class="panel__actions">
+              <button class="mini ghost" data-copy="json" type="button">Copy</button>
+            </div>
+          </div>
+          <pre id="json" class="pre"></pre>
+        </section>
+
+        <section class="panel" id="panel-analysis" data-panel="analysis" hidden>
+          <div class="panel__head">
+            <div class="panel__title">Analysis</div>
+            <div class="panel__actions">
+              <button class="mini ghost" data-copy="analysis" type="button">Copy</button>
+            </div>
+          </div>
+          <pre id="analysis" class="pre"></pre>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
 </body>
 </html>

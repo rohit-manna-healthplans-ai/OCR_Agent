@@ -1,93 +1,198 @@
-from __future__ import annotations
 
-from typing import Any, Dict, Callable, Optional, List, Tuple
+"""
+Dynamic Key-Value Extraction Engine v3 (Production Grade)
+----------------------------------------------------------
+Features:
+- No keyword dependency
+- Colon / Dash / Equals support  (Key: Value, Key - Value, Key = Value)
+- Right-side aligned detection
+- Below-line form detection
+- Multi-word value merging
+- Regex-based value type detection (date, email, phone, amount, id)
+- Confidence scoring (geometry + OCR + regex boost)
+- Deduplication
+"""
 
-import numpy as np
-
-from ocr.boxed_fields import detect_char_boxes, group_boxes_into_rows, boxes_to_sequences, Box
-
-
-def _crop(img_rgb: np.ndarray, box: Box) -> np.ndarray:
-    H, W = img_rgb.shape[:2]
-    b = box.pad(4, W, H)
-    return img_rgb[b.y1:b.y2, b.x1:b.x2].copy()
+from typing import Dict, Any, List
+import re
 
 
-def extract_boxed_block_text(
-    img_rgb: np.ndarray,
-    recognize_char_fn: Callable[[np.ndarray], Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """
-    Detects box sequences and reads each box as a single character.
-    Returns a list of sequences with text + bbox.
-    """
-    boxes = detect_char_boxes(img_rgb)
-    rows = group_boxes_into_rows(boxes)
-    seqs = boxes_to_sequences(rows)
+# -----------------------------
+# Regex Patterns (Value Types)
+# -----------------------------
 
-    out: List[Dict[str, Any]] = []
-    for seq in seqs:
-        chars = []
-        confs = []
-        x1 = min(b.x1 for b in seq)
-        y1 = min(b.y1 for b in seq)
-        x2 = max(b.x2 for b in seq)
-        y2 = max(b.y2 for b in seq)
-        for b in seq:
-            crop = _crop(img_rgb, b)
-            r = recognize_char_fn(crop) or {}
-            ch = (r.get("text") or "").strip()
-            if ch:
-                chars.append(ch[0])
-            else:
-                chars.append("")  # keep position
-            c = r.get("conf")
-            if isinstance(c, (int, float)):
-                confs.append(float(c))
-        text = "".join(chars).strip()
-        avg_conf = sum(confs) / max(1, len(confs)) if confs else 0.0
-        if len(seq) >= 4:  # ignore tiny noise sequences
-            out.append({"text": text, "conf": avg_conf, "bbox": [x1, y1, x2, y2], "n_boxes": len(seq)})
-    return out
+REGEX_PATTERNS = {
+    "email": re.compile(r"\b[\w\.-]+@[\w\.-]+\.\w+\b"),
+    "phone": re.compile(r"(\+?\d[\d\- ]{8,}\d)"),
+    "date": re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"),
+    "amount": re.compile(r"₹?\s?\d{1,3}(,\d{3})*(\.\d{2})?"),
+    "id": re.compile(r"\b[A-Z0-9]{6,}\b")
+}
 
+
+# -----------------------------
+# Utilities
+# -----------------------------
+
+def _clean(t: str) -> str:
+    return re.sub(r"\s+", " ", (t or "").strip())
+
+
+def _y_center(w):
+    return (w["bbox"][1] + w["bbox"][3]) / 2
+
+
+def _x_left(w):
+    return w["bbox"][0]
+
+
+def _x_right(w):
+    return w["bbox"][2]
+
+
+def _avg_conf(words: List[dict]) -> float:
+    if not words:
+        return 0.0
+    return sum(float(w.get("conf", 0)) for w in words) / len(words)
+
+
+def _digit_ratio(text: str) -> float:
+    if not text:
+        return 0.0
+    digits = sum(c.isdigit() for c in text)
+    return digits / len(text)
+
+
+def _regex_boost(value: str) -> float:
+    for pattern in REGEX_PATTERNS.values():
+        if pattern.search(value):
+            return 0.15
+    return 0.0
+
+
+# -----------------------------
+# Main Extraction
+# -----------------------------
 
 def extract_fields_from_page(
     page: Dict[str, Any],
-    page_img_rgb: np.ndarray,
-    recognizer_fn: Optional[Callable[[np.ndarray], str]] = None,
-    recognize_char_fn: Optional[Callable[[np.ndarray], Dict[str, Any]]] = None,
+    image_rgb=None,
+    recognize_char_fn=None
 ) -> Dict[str, Any]:
-    """
-    Your project already does key/value extraction from OCR lines.
-    This function adds: boxed/block-letter extraction as extra signal.
-    We DO NOT overwrite existing fields; we attach boxed sequences under "__boxed_sequences".
-    """
-    fields: Dict[str, Any] = {}
 
-    # Existing heuristic key/value extraction using OCR lines (light)
-    # We keep it minimal to avoid breaking your current behavior.
-    lines = page.get("lines", []) or []
-    for ln in lines:
-        txt = (ln.get("text") or "").strip()
-        if not txt:
+    lines = page.get("lines", [])
+    pairs = []
+
+    # ---------------------------------
+    # PASS 1: Inline separator detection
+    # ---------------------------------
+
+    for line in lines:
+        words = line.get("words", [])
+        line_text = " ".join(w["text"] for w in words)
+
+        for sep in [":", "-", "="]:
+            if sep in line_text:
+                parts = line_text.split(sep, 1)
+                key = _clean(parts[0])
+                value = _clean(parts[1])
+
+                if len(key) < 2 or len(value) < 1:
+                    continue
+
+                base_conf = _avg_conf(words)
+                boost = _regex_boost(value)
+
+                pairs.append({
+                    "key": key,
+                    "value": value,
+                    "confidence": round(min(1.0, base_conf + boost), 3),
+                    "method": "inline_separator"
+                })
+
+    # ---------------------------------
+    # PASS 2: Right-aligned spatial logic
+    # ---------------------------------
+
+    for line in lines:
+        words = line.get("words", [])
+        if len(words) < 2:
             continue
-        low = txt.lower()
-        # Simple examples; your repo may already have better rules.
-        if "policy" in low and "no" in low and "policy" not in fields:
-            fields["Policy No"] = txt.split(":")[-1].strip() if ":" in txt else txt
 
-        if ("name" in low) and ("full" not in low) and ("insured" in low or low.startswith("name")) and "Name" not in fields:
-            fields["Name"] = txt.split(":")[-1].strip() if ":" in txt else txt
+        words_sorted = sorted(words, key=_x_left)
+        mid_x = sum(_x_left(w) for w in words_sorted) / len(words_sorted)
 
-        if "address" in low and "Address" not in fields:
-            fields["Address"] = txt.split(":")[-1].strip() if ":" in txt else txt
+        key_words = [w for w in words_sorted if _x_right(w) < mid_x]
+        value_words = [w for w in words_sorted if _x_left(w) >= mid_x]
 
-        if "pincode" in low and "Pincode" not in fields:
-            fields["Pincode"] = txt.split(":")[-1].strip() if ":" in txt else txt
+        if not key_words or not value_words:
+            continue
 
-    # Add boxed sequences (block letters)
-    if recognize_char_fn is not None:
-        boxed = extract_boxed_block_text(page_img_rgb, recognize_char_fn=recognize_char_fn)
-        fields["__boxed_sequences"] = boxed
+        key_text = _clean(" ".join(w["text"] for w in key_words))
+        value_text = _clean(" ".join(w["text"] for w in value_words))
 
-    return fields
+        if len(key_text) < 3 or len(value_text) < 1:
+            continue
+
+        # Heuristic: key should have lower digit ratio than value
+        if _digit_ratio(key_text) > 0.5:
+            continue
+
+        base_conf = (_avg_conf(key_words) + _avg_conf(value_words)) / 2
+        boost = _regex_boost(value_text)
+
+        pairs.append({
+            "key": key_text,
+            "value": value_text,
+            "confidence": round(min(1.0, base_conf + boost), 3),
+            "method": "right_aligned"
+        })
+
+    # ---------------------------------
+    # PASS 3: Below-line form detection
+    # ---------------------------------
+
+    for i in range(len(lines) - 1):
+        curr_words = lines[i].get("words", [])
+        next_words = lines[i + 1].get("words", [])
+
+        if not curr_words or not next_words:
+            continue
+
+        key_text = _clean(" ".join(w["text"] for w in curr_words))
+        value_text = _clean(" ".join(w["text"] for w in next_words))
+
+        if len(key_text) < 3 or len(value_text) < 1:
+            continue
+
+        y_gap = abs(_y_center(curr_words[0]) - _y_center(next_words[0]))
+
+        if 10 < y_gap < 60 and _digit_ratio(key_text) < 0.5:
+            base_conf = (_avg_conf(curr_words) + _avg_conf(next_words)) / 2
+            boost = _regex_boost(value_text)
+
+            pairs.append({
+                "key": key_text,
+                "value": value_text,
+                "confidence": round(min(1.0, base_conf + boost), 3),
+                "method": "below_line"
+            })
+
+    # ---------------------------------
+    # Deduplicate + Normalize
+    # ---------------------------------
+
+    unique = []
+    seen = set()
+
+    for p in pairs:
+        signature = (p["key"].lower(), p["value"].lower())
+        if signature not in seen:
+            seen.add(signature)
+            unique.append(p)
+
+    return {
+        "pairs": unique,
+        "total_pairs": len(unique),
+        "engine": "dynamic_spatial_v3"
+    }

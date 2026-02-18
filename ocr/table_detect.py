@@ -1,138 +1,103 @@
-from __future__ import annotations
 
-from typing import Any, Dict, List
+"""
+Multi-table detector.
+Detects separate table regions using row clustering.
+"""
 
-
-def _bbox_union(bboxes: List[List[int]]) -> List[int]:
-    xs1 = [b[0] for b in bboxes]
-    ys1 = [b[1] for b in bboxes]
-    xs2 = [b[2] for b in bboxes]
-    ys2 = [b[3] for b in bboxes]
-    return [min(xs1), min(ys1), max(xs2), max(ys2)]
+from typing import List, Dict, Any
 
 
-def _center_y(b: List[int]) -> float:
-    return (b[1] + b[3]) / 2.0
+def _bbox_union(boxes):
+    return [
+        min(b[0] for b in boxes),
+        min(b[1] for b in boxes),
+        max(b[2] for b in boxes),
+        max(b[3] for b in boxes),
+    ]
 
 
-def _height(b: List[int]) -> int:
-    return max(1, b[3] - b[1])
+def _y_center(w):
+    return (w["bbox"][1] + w["bbox"][3]) / 2
 
 
-def _cluster_rows(words: List[Dict[str, Any]], tol: float) -> List[List[Dict[str, Any]]]:
-    items = sorted(words, key=lambda w: (_center_y(w["bbox"]), w["bbox"][0]))
-    rows: List[List[Dict[str, Any]]] = []
-    for w in items:
-        cy = _center_y(w["bbox"])
-        placed = False
-        for row in rows:
-            rcy = _center_y(row[0]["bbox"])
-            if abs(cy - rcy) <= tol:
-                row.append(w)
-                placed = True
-                break
-        if not placed:
-            rows.append([w])
-    for row in rows:
-        row.sort(key=lambda w: w["bbox"][0])
-    return rows
-
-
-def _cluster_columns(x_positions: List[int], tol: int = 25) -> List[int]:
-    xs = sorted(x_positions)
-    cols: List[List[int]] = []
-    for x in xs:
-        if not cols:
-            cols.append([x])
-            continue
-        if abs(x - cols[-1][-1]) <= tol:
-            cols[-1].append(x)
-        else:
-            cols.append([x])
-    anchors = [c[len(c) // 2] for c in cols]
-    return anchors
-
-
-def _assign_to_col(x1: int, col_anchors: List[int]) -> int:
-    best_i = 0
-    best_d = float("inf")
-    for i, a in enumerate(col_anchors):
-        d = abs(x1 - a)
-        if d < best_d:
-            best_d = d
-            best_i = i
-    return best_i
+def _x_center(w):
+    return (w["bbox"][0] + w["bbox"][2]) / 2
 
 
 def detect_tables_from_page(page: Dict[str, Any]) -> List[Dict[str, Any]]:
-    lines = page.get("lines") or []
-    if not lines:
+    words = []
+    for line in page.get("lines", []):
+        for w in line.get("words", []):
+            words.append(w)
+
+    if len(words) < 8:
         return []
 
-    words: List[Dict[str, Any]] = []
-    for ln in lines:
-        for w in (ln.get("words") or []):
-            t = (w.get("text") or "").strip()
-            if not t:
-                continue
-            words.append({"text": t, "bbox": w["bbox"], "conf": float(w.get("conf") or 0.0)})
+    # Cluster rows
+    rows = []
+    for w in sorted(words, key=_y_center):
+        yc = _y_center(w)
+        placed = False
+        for row in rows:
+            if abs(row["yc"] - yc) < 12:
+                row["words"].append(w)
+                row["yc"] = sum(_y_center(x) for x in row["words"]) / len(row["words"])
+                placed = True
+                break
+        if not placed:
+            rows.append({"yc": yc, "words": [w]})
 
-    if len(words) < 20:
+    candidate_rows = [r for r in rows if len(r["words"]) >= 3]
+    if not candidate_rows:
         return []
 
-    heights = sorted(_height(w["bbox"]) for w in words)
-    med_h = heights[len(heights) // 2]
-    tol = max(10.0, min(40.0, med_h * 0.7))
+    tables = []
+    current = []
+    last_y = None
 
-    rows = _cluster_rows(words, tol=tol)
+    for r in sorted(candidate_rows, key=lambda x: x["yc"]):
+        if last_y is None or abs(r["yc"] - last_y) < 40:
+            current.append(r)
+        else:
+            if len(current) >= 2:
+                tables.append(current)
+            current = [r]
+        last_y = r["yc"]
 
-    candidate_rows = [r for r in rows if len(r) >= 2]
-    if len(candidate_rows) < 3:
-        return []
+    if len(current) >= 2:
+        tables.append(current)
 
-    xs = []
-    for r in candidate_rows:
-        xs.extend([w["bbox"][0] for w in r])
+    results = []
 
-    col_anchors = _cluster_columns(xs, tol=28)
-    if len(col_anchors) < 2:
-        return []
+    for tbl_rows in tables:
+        grid = []
+        all_boxes = []
 
-    if len(col_anchors) > 12:
-        col_anchors = col_anchors[:12]
+        x_positions = []
+        for r in tbl_rows:
+            for w in r["words"]:
+                x_positions.append(_x_center(w))
 
-    grid: List[List[str]] = []
-    used_bboxes: List[List[int]] = []
+        x_positions = sorted(x_positions)
+        columns = []
+        for x in x_positions:
+            if not columns or abs(columns[-1] - x) > 40:
+                columns.append(x)
 
-    for r in candidate_rows:
-        row_cells = [""] * len(col_anchors)
-        for w in r:
-            c = _assign_to_col(w["bbox"][0], col_anchors)
-            if row_cells[c]:
-                row_cells[c] = row_cells[c] + " " + w["text"]
-            else:
-                row_cells[c] = w["text"]
-            used_bboxes.append(w["bbox"])
+        for r in tbl_rows:
+            row_cells = [""] * len(columns)
+            for w in r["words"]:
+                xc = _x_center(w)
+                col_idx = min(range(len(columns)), key=lambda i: abs(columns[i] - xc))
+                row_cells[col_idx] = (row_cells[col_idx] + " " + w["text"]).strip()
+                all_boxes.append(w["bbox"])
+            grid.append(row_cells)
 
-        if sum(1 for x in row_cells if x.strip()) >= 2:
-            grid.append([x.strip() for x in row_cells])
+        results.append({
+            "bbox": _bbox_union(all_boxes),
+            "rows": grid,
+            "row_count": len(grid),
+            "col_count": len(columns)
+        })
 
-    if len(grid) < 3:
-        return []
-
-    col_keep = []
-    for j in range(len(col_anchors)):
-        if any((row[j] or "").strip() for row in grid):
-            col_keep.append(j)
-    grid = [[row[j] for j in col_keep] for row in grid]
-    n_cols = len(grid[0]) if grid else 0
-    if n_cols < 2:
-        return []
-
-    bbox = _bbox_union(used_bboxes) if used_bboxes else [0, 0, 0, 0]
-    return [{
-        "bbox": bbox,
-        "n_rows": len(grid),
-        "n_cols": n_cols,
-        "cells": grid,
-    }]
+    return results
