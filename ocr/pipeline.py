@@ -1,20 +1,22 @@
 from __future__ import annotations
 
 """
-Fast + stable pipeline (Windows/Python 3.11):
-- PaddleOCR primary
-- Tesseract fallback (auto routing, less frequent for speed)
-- preset=auto uses only clean_doc (fast)
-- layout via PP-Structure (page 0 only, optional)
-- analysis always returned
+Enterprise OCR Pipeline (BACKWARD COMPATIBLE) + Screen Intelligence
 
-PHASE-1 UPGRADE (BACKWARD COMPATIBLE):
-- Memory-safe PDF rendering via render_pdf_pages() (generator)
-- Optional multiprocessing for scanned PDFs (parallel_pages=True)
+What's new:
+- SCREEN MODE (auto-detected for screenshots):
+  - Segments regions: topbar / sidebar / main / footer
+  - OCR per region (parallel-ready; currently sequential for stability)
+  - Table detection only on main/sidebar (not on chrome/footer)
+  - Reconstructs a copyable "page" that matches screen order (Markdown)
+  - Exposes out["regions"] with per-region OCR, tables, markdown
+- TABLE IMPROVEMENTS:
+  - kind="form_grid" vs kind="table" (from table_detect)
+  - form_grid auto-converted to fields pairs
+- FIELD IMPROVEMENTS:
+  - UI-safe key/value extraction (no URL/taskbar junk) from main region
 
-PHASE-UI UPGRADE (BACKWARD COMPATIBLE):
-- Adds page["text_markdown"] with heading/bold heuristics derived from OCR bbox sizes.
-  (No schema changes; extra keys are added post to_dict.)
+All existing API endpoints keep working.
 """
 
 import os
@@ -36,7 +38,7 @@ if TYPE_CHECKING:
 from concurrent.futures import ProcessPoolExecutor, as_completed  # noqa: E402
 
 from ocr.pdf_utils import extract_text_if_digital, render_pdf_pages, render_pdf_page  # noqa: E402
-from ocr.preprocess import preprocess  # noqa: E402
+from ocr.preprocess import preprocess, is_probable_screenshot, segment_screen_regions, crop_region  # noqa: E402
 from ocr.postprocess import normalize_linebreaks, validate_fields  # noqa: E402
 from ocr.schemas import Word, Line, PageResult, to_dict  # noqa: E402
 from ocr.table_detect import detect_tables_from_page  # noqa: E402
@@ -216,12 +218,10 @@ def _line_height(line_dict: Dict[str, Any]) -> int:
 
 
 def _classify_line_style(line_text: str, line_h: int) -> str:
-    # Quick heuristic tuned for DPI ~200
     if line_h >= 40:
         return "heading"
     if line_h >= 28:
         return "subheading"
-    # Treat short, mostly uppercase as bold-ish label
     if len((line_text or "").strip()) <= 40 and _uppercase_ratio(line_text) >= 0.75:
         return "bold"
     return "normal"
@@ -248,16 +248,9 @@ def _build_markdown_for_page(page_dict: Dict[str, Any]) -> str:
     return "\n".join(parts).strip()
 
 
-def _process_scanned_pdf_page_worker(args: Tuple[str, int, int, str, str, bool]) -> Tuple[int, PageResult, Optional[dict], Optional[np.ndarray], str, str, int, int]:
-    pdf_path, page_idx, dpi, preset, engine, return_debug = args
-
-    img_rgb = render_pdf_page(pdf_path, page_idx, dpi=dpi)
-
-    paddle_words, used_preset, used_img = _ocr_best_of_presets(img_rgb, preset=preset)
-    engine_used, final_words = _route_engine(used_img, paddle_words, force_engine=engine)
-
-    h, w = used_img.shape[:2]
-    line_groups = group_into_lines(final_words)
+def _page_from_words(page_index: int, img_rgb: np.ndarray, words: List[dict]) -> PageResult:
+    h, w = img_rgb.shape[:2]
+    line_groups = group_into_lines(words)
 
     lines: List[Line] = []
     page_text_lines: List[str] = []
@@ -276,7 +269,37 @@ def _process_scanned_pdf_page_worker(args: Tuple[str, int, int, str, str, bool])
         page_text_lines.append(txt)
 
     page_text = "\n".join(page_text_lines).strip()
-    page_result = PageResult(page_index=page_idx, width=w, height=h, text=page_text, lines=lines)
+    return PageResult(page_index=page_index, width=w, height=h, text=page_text, lines=lines)
+
+
+def _convert_form_grids_to_fields(tables: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    pairs: List[Dict[str, Any]] = []
+    for t in tables or []:
+        if t.get("kind") != "form_grid":
+            continue
+        rows = t.get("rows") or []
+        if len(rows) != 2:
+            continue
+        keys = rows[0]
+        vals = rows[1]
+        for k, v in zip(keys, vals):
+            kk = (k or "").strip()
+            vv = (v or "").strip()
+            if len(kk) < 2 or len(vv) < 1:
+                continue
+            pairs.append({"key": kk, "value": vv, "confidence": 0.95, "method": "form_grid"})
+    return pairs
+
+
+def _process_scanned_pdf_page_worker(args: Tuple[str, int, int, str, str, bool]) -> Tuple[int, PageResult, Optional[dict], Optional[np.ndarray], str, str, int, int]:
+    pdf_path, page_idx, dpi, preset, engine, return_debug = args
+
+    img_rgb = render_pdf_page(pdf_path, page_idx, dpi=dpi)
+
+    paddle_words, used_preset, used_img = _ocr_best_of_presets(img_rgb, preset=preset)
+    engine_used, final_words = _route_engine(used_img, paddle_words, force_engine=engine)
+
+    page_result = _page_from_words(page_idx, used_img, final_words)
 
     dbg = None
     if return_debug:
@@ -285,12 +308,131 @@ def _process_scanned_pdf_page_worker(args: Tuple[str, int, int, str, str, bool])
             "preset_used": used_preset,
             "engine_used": engine_used,
             "words_count": len(final_words),
-            "lines_count": len(lines),
+            "lines_count": len(page_result.lines),
             "score": _score_words(final_words),
         }
 
     first_img = used_img if page_idx == 0 else None
-    return page_idx, page_result, dbg, first_img, used_preset, engine_used, w, h
+    return page_idx, page_result, dbg, first_img, used_preset, engine_used, page_result.width, page_result.height
+
+
+def _run_screen_ocr(img_rgb: np.ndarray, preset: str, engine: str, return_layout: bool, return_debug: bool) -> Dict[str, Any]:
+    H, W = img_rgb.shape[:2]
+    meta: Dict[str, Any] = {
+        "input_type": "image",
+        "screen_mode": True,
+        "dpi": None,
+        "preset_requested": preset,
+        "engine_requested": engine,
+        "return_layout": bool(return_layout),
+    }
+
+    # Regions
+    regions = segment_screen_regions(img_rgb)
+    meta["regions_detected"] = [r["name"] for r in regions]
+
+    region_outputs: List[Dict[str, Any]] = []
+    combined_parts: List[str] = []
+    debug_info: List[dict] = []
+
+    for idx, r in enumerate(regions):
+        name = r["name"]
+        bbox = r["bbox"]
+        crop = crop_region(img_rgb, bbox)
+
+        paddle_words, used_preset, used_img = _ocr_best_of_presets(crop, preset=preset)
+        engine_used, final_words = _route_engine(used_img, paddle_words, force_engine=engine)
+
+        pr = _page_from_words(0, used_img, final_words)
+        rd = to_dict([pr], {"_region": name})
+        region_page = rd["pages"][0]
+        region_page["text"] = normalize_linebreaks(region_page.get("text") or "")
+        region_page["text_markdown"] = _build_markdown_for_page(region_page)
+
+        # region tables
+        region_tables = detect_tables_from_page(region_page, region_name=name)
+        region_page["tables"] = region_tables
+
+        # layout only for main region (fast, useful)
+        if return_layout and name == "main":
+            try:
+                region_page["layout"] = analyze_layout(used_img)
+            except Exception:
+                region_page["layout"] = {"available": False, "blocks": []}
+        else:
+            region_page["layout"] = {"available": False, "blocks": []}
+
+        region_out = {
+            "name": name,
+            "bbox": bbox,  # in full image coords
+            "engine_used": engine_used,
+            "preset_used": used_preset,
+            "page": region_page,
+        }
+        region_outputs.append(region_out)
+
+        if return_debug:
+            debug_info.append({
+                "region": name,
+                "preset_used": used_preset,
+                "engine_used": engine_used,
+                "words_count": len(final_words),
+                "lines_count": len(region_page.get("lines") or []),
+                "score": _score_words(final_words),
+                "bbox": bbox,
+            })
+
+        # Build combined markdown in screen order
+        combined_parts.append(f"## [{name.upper()}]")
+        combined_parts.append(region_page.get("text_markdown") or "")
+
+    # Build a synthetic "page 0" that represents the whole screen in text form
+    combined_md = "\n".join([p for p in combined_parts if p]).strip()
+    combined_text = normalize_linebreaks("\n".join([normalize_linebreaks(r["page"].get("text") or "") for r in region_outputs]).strip())
+
+    page0 = PageResult(page_index=0, width=W, height=H, text=combined_text, lines=[])
+    out = to_dict([page0], meta)
+    out["text"] = combined_text
+    out["pages"][0]["text_markdown"] = combined_md
+    out["pages"][0]["tables"] = []  # tables are stored in regions
+    out["pages"][0]["layout"] = {"available": False, "blocks": []}
+
+    # Fields: from MAIN region only (business fields), plus form_grid conversion
+    fields_pairs: List[Dict[str, Any]] = []
+    main_region = next((r for r in region_outputs if r["name"] == "main"), None)
+    if main_region:
+        main_page = main_region["page"]
+        # Convert form grids to fields
+        fields_pairs.extend(_convert_form_grids_to_fields(main_page.get("tables") or []))
+
+        # Extract additional KV from main (UI-safe extractor)
+        try:
+            kv = extract_fields_from_page(main_page, crop_region(img_rgb, main_region["bbox"]))
+            for p in (kv.get("pairs") or []):
+                fields_pairs.append(p)
+        except Exception:
+            pass
+
+    # Dedup fields
+    dedup = []
+    seen = set()
+    for p in fields_pairs:
+        k = (p.get("key") or "").strip()
+        v = (p.get("value") or "").strip()
+        sig = (k.lower(), v.lower())
+        if not k or not v or sig in seen:
+            continue
+        seen.add(sig)
+        dedup.append(p)
+
+    out["fields"] = validate_fields({"pairs": dedup, "total_pairs": len(dedup), "engine": "screen_kv_v1"})
+    out["regions"] = region_outputs
+
+    if return_debug:
+        out["debug"] = debug_info
+
+    out["analysis"] = analyze_result(out)
+    return out
 
 
 def run_ocr(
@@ -324,6 +466,15 @@ def run_ocr(
         "has_markdown": True,
     }
 
+    if suffix != ".pdf":
+        img = _read_image(str(p))
+        # AUTO screen mode for screenshots
+        if is_probable_screenshot(img):
+            return _run_screen_ocr(img, preset=preset, engine=engine, return_layout=return_layout, return_debug=return_debug)
+
+    # ----------------------------
+    # PDF / Standard image pipeline
+    # ----------------------------
     if suffix == ".pdf":
         digital = extract_text_if_digital(str(p), max_pages=max_pages)
         if digital:
@@ -376,27 +527,8 @@ def run_ocr(
                     engine_used_first = engine_used
                 meta["engine_used"] = engine_used_first or engine_used
 
-                h, w = used_img.shape[:2]
-                line_groups = group_into_lines(final_words)
-
-                lines: List[Line] = []
-                page_text_lines: List[str] = []
-                for grp in line_groups:
-                    txt = line_text(grp)
-                    if not txt:
-                        continue
-                    bbox = merge_line_bbox(grp)
-                    conf = compute_line_conf(grp)
-                    lines.append(Line(
-                        text=txt,
-                        conf=conf,
-                        bbox=bbox,
-                        words=[Word(text=x["text"], conf=float(x["conf"]), bbox=x["bbox"]) for x in grp],
-                    ))
-                    page_text_lines.append(txt)
-
-                page_text = "\n".join(page_text_lines).strip()
-                page_results.append(PageResult(page_index=page_idx, width=w, height=h, text=page_text, lines=lines))
+                pr = _page_from_words(page_idx, used_img, final_words)
+                page_results.append(pr)
 
                 if return_debug:
                     debug_info.append({
@@ -404,7 +536,7 @@ def run_ocr(
                         "preset_used": used_preset,
                         "engine_used": engine_used,
                         "words_count": len(final_words),
-                        "lines_count": len(lines),
+                        "lines_count": len(pr.lines),
                         "score": _score_words(final_words),
                     })
 
@@ -423,7 +555,7 @@ def run_ocr(
             pg["text_markdown"] = _build_markdown_for_page(pg)
 
         for pg in out.get("pages", []):
-            pg["tables"] = detect_tables_from_page(pg)
+            pg["tables"] = detect_tables_from_page(pg, region_name="main")
 
         if return_layout:
             for i, pg in enumerate(out.get("pages", [])):
@@ -435,10 +567,18 @@ def run_ocr(
             for pg in out.get("pages", []):
                 pg["layout"] = {"available": False, "blocks": []}
 
+        # Fields from page 0 (document-style)
         if out.get("pages") and first_page_img is not None:
             def _char_fn(crop_rgb: np.ndarray) -> Dict[str, Any]:
                 return run_tesseract_single_char(crop_rgb, whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
             out["fields"] = extract_fields_from_page(out["pages"][0], first_page_img, recognize_char_fn=_char_fn)
+            # Also auto-convert any form_grids to fields
+            fg_pairs = _convert_form_grids_to_fields(out["pages"][0].get("tables") or [])
+            if fg_pairs:
+                merged = (out.get("fields") or {}).get("pairs") or []
+                merged.extend(fg_pairs)
+                out["fields"]["pairs"] = merged
+                out["fields"]["total_pairs"] = len(merged)
             out["fields"] = validate_fields(out.get("fields") or {})
         else:
             out["fields"] = {}
@@ -449,6 +589,7 @@ def run_ocr(
         out["analysis"] = analyze_result(out)
         return out
 
+    # Standard image pipeline
     img = _read_image(str(p))
     paddle_words, used_preset, used_img = _ocr_best_of_presets(img, preset=preset)
     meta["preset_used"] = used_preset
@@ -456,27 +597,8 @@ def run_ocr(
     engine_used, final_words = _route_engine(used_img, paddle_words, force_engine=engine)
     meta["engine_used"] = engine_used
 
-    h, w = used_img.shape[:2]
-    line_groups = group_into_lines(final_words)
-
-    lines: List[Line] = []
-    page_text_lines: List[str] = []
-    for grp in line_groups:
-        txt = line_text(grp)
-        if not txt:
-            continue
-        bbox = merge_line_bbox(grp)
-        conf = compute_line_conf(grp)
-        lines.append(Line(
-            text=txt,
-            conf=conf,
-            bbox=bbox,
-            words=[Word(text=x["text"], conf=float(x["conf"]), bbox=x["bbox"]) for x in grp],
-        ))
-        page_text_lines.append(txt)
-
-    page_text = "\n".join(page_text_lines).strip()
-    page_results = [PageResult(page_index=0, width=w, height=h, text=page_text, lines=lines)]
+    pr = _page_from_words(0, used_img, final_words)
+    page_results = [pr]
 
     debug_info: List[dict] = []
     if return_debug:
@@ -485,7 +607,7 @@ def run_ocr(
             "preset_used": used_preset,
             "engine_used": engine_used,
             "words_count": len(final_words),
-            "lines_count": len(lines),
+            "lines_count": len(pr.lines),
             "score": _score_words(final_words),
         })
 
@@ -495,7 +617,7 @@ def run_ocr(
     for pg in out.get("pages", []):
         pg["text"] = normalize_linebreaks(pg.get("text") or "")
         pg["text_markdown"] = _build_markdown_for_page(pg)
-        pg["tables"] = detect_tables_from_page(pg)
+        pg["tables"] = detect_tables_from_page(pg, region_name="main")
 
     if return_layout:
         out["pages"][0]["layout"] = analyze_layout(used_img)
@@ -505,6 +627,15 @@ def run_ocr(
     def _char_fn(crop_rgb: np.ndarray) -> Dict[str, Any]:
         return run_tesseract_single_char(crop_rgb, whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
     out["fields"] = extract_fields_from_page(out["pages"][0], used_img, recognize_char_fn=_char_fn)
+
+    # Convert form_grids to fields
+    fg_pairs = _convert_form_grids_to_fields(out["pages"][0].get("tables") or [])
+    if fg_pairs:
+        merged = (out.get("fields") or {}).get("pairs") or []
+        merged.extend(fg_pairs)
+        out["fields"]["pairs"] = merged
+        out["fields"]["total_pairs"] = len(merged)
+
     out["fields"] = validate_fields(out.get("fields") or {})
 
     if return_debug:
