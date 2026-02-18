@@ -10,7 +10,10 @@
 <div class="app-container">
 
   <aside class="sidebar">
-    <h2>Batch Documents</h2>
+    <div class="sidebar-header">
+      <h2>Batch Documents</h2>
+      <div id="status" class="status">Idle</div>
+    </div>
     <div id="batch_results" class="batch-list"></div>
   </aside>
 
@@ -27,23 +30,35 @@
         <button id="run">Single OCR</button>
         <button id="batch">Batch OCR</button>
         <button id="docx">Download DOCX</button>
+        <button id="json_download">Download JSON</button>
       </div>
-      <div id="status" class="status">Idle</div>
     </header>
 
     <section class="output-section">
       <div class="panel">
-        <h3>Extracted Fields</h3>
+        <div class="panel-title">Extracted Fields</div>
         <pre id="fields"></pre>
       </div>
 
-      <div class="panel">
-        <h3>OCR Text</h3>
+      <div class="panel panel-wide">
+        <div class="panel-title">OCR Text</div>
         <pre id="text"></pre>
       </div>
 
+      <div class="panel panel-wide">
+        <div class="panel-title">Tables</div>
+        <div id="tables" class="tables-wrap">
+          <div class="muted">No tables extracted yet.</div>
+        </div>
+      </div>
+
+      <div class="panel panel-wide">
+        <div class="panel-title">JSON</div>
+        <pre id="json"></pre>
+      </div>
+
       <div class="panel">
-        <h3>Analysis</h3>
+        <div class="panel-title">Analysis</div>
         <pre id="analysis"></pre>
       </div>
     </section>

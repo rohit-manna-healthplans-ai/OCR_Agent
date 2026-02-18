@@ -1,5 +1,4 @@
-
-/* CLEAN WORKING VERSION - Compatible with current index.html */
+/* WORKING UI + TABLE + JSON VIEW + JSON DOWNLOAD (Batch + Single) */
 
 function $(id) { return document.getElementById(id); }
 
@@ -12,11 +11,120 @@ function prettyJson(obj) {
   try { return JSON.stringify(obj, null, 2); } catch { return String(obj); }
 }
 
+function escapeHtml(s) {
+  if (s === null || s === undefined) return "";
+  return String(s)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+let __currentDoc = null;
+let __currentBatch = null;
+
+function renderJsonPanel(obj) {
+  const el = $("json");
+  if (!el) return;
+  el.textContent = prettyJson(obj || {});
+}
+
+function downloadJson(filename, obj) {
+  const blob = new Blob([prettyJson(obj)], { type: "application/json;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+function downloadCurrentJson() {
+  if (__currentDoc) {
+    const base = (__currentDoc.filename ? __currentDoc.filename : "ocr_result");
+    const safe = base.replace(/[^a-z0-9._-]/gi, "_");
+    downloadJson(safe + ".json", __currentDoc);
+    return;
+  }
+  if (__currentBatch) {
+    downloadJson("batch_results.json", __currentBatch);
+    return;
+  }
+  alert("No JSON available yet. Run OCR first.");
+}
+
 function clearOutputs() {
   if ($("fields")) $("fields").textContent = "";
   if ($("text")) $("text").textContent = "";
   if ($("analysis")) $("analysis").textContent = "";
+  if ($("json")) $("json").textContent = "";
+  if ($("tables")) $("tables").innerHTML = '<div class="muted">No tables extracted yet.</div>';
   if ($("batch_results")) $("batch_results").innerHTML = "";
+  __currentDoc = null;
+  __currentBatch = null;
+}
+
+function renderTables(doc) {
+  const wrap = $("tables");
+  if (!wrap) return;
+
+  const pages = (doc && doc.pages) ? doc.pages : [];
+  const tableBlocks = [];
+
+  pages.forEach((p, pageIndex) => {
+    const tables = p.tables || [];
+    tables.forEach((t, ti) => {
+      tableBlocks.push({ pageIndex, t, ti });
+    });
+  });
+
+  if (tableBlocks.length === 0) {
+    wrap.innerHTML = '<div class="muted">No tables detected in this document.</div>';
+    return;
+  }
+
+  const htmlParts = [];
+
+  for (const blk of tableBlocks) {
+    const t = blk.t || {};
+    const cells = t.cells || [];
+    const nRows = t.n_rows || cells.length || 0;
+    const nCols = t.n_cols || (cells[0] ? cells[0].length : 0);
+    const bbox = t.bbox ? t.bbox.join(",") : "n/a";
+
+    htmlParts.push(`
+      <div class="table-block">
+        <div class="table-head">
+          <div>Page ${blk.pageIndex + 1} • Table ${blk.ti + 1} (${nRows}×${nCols})</div>
+          <div class="table-note">bbox: ${escapeHtml(bbox)}</div>
+        </div>
+        <div style="overflow:auto;">
+          <table class="ocr-table">
+            <tbody>
+              ${cells.map(row => `
+                <tr>
+                  ${(row || []).map(cell => `<td>${escapeHtml(cell)}</td>`).join("")}
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `);
+  }
+
+  wrap.innerHTML = htmlParts.join("");
+}
+
+function renderDoc(doc) {
+  if (!doc) return;
+  __currentDoc = doc;
+  if ($("fields")) $("fields").textContent = prettyJson(doc.fields || {});
+  if ($("text")) $("text").textContent = doc.text || "";
+  if ($("analysis")) $("analysis").textContent = prettyJson(doc.analysis || {});
+  renderJsonPanel(doc);
+  renderTables(doc);
 }
 
 /* ================= SINGLE OCR ================= */
@@ -44,12 +152,11 @@ async function runSingleOCR() {
     if (!res.ok) {
       setStatus("Error");
       console.error(data);
+      alert("OCR failed. Check server logs.");
       return;
     }
 
-    $("fields").textContent = prettyJson(data.fields || {});
-    $("text").textContent = data.text || "";
-    $("analysis").textContent = prettyJson(data.analysis || {});
+    renderDoc(data);
     setStatus("Done ✅");
 
   } catch (err) {
@@ -61,13 +168,15 @@ async function runSingleOCR() {
 /* ================= BATCH OCR ================= */
 
 function renderBatchResults(data) {
+  __currentBatch = data;
+
   const container = $("batch_results");
   if (!container) return;
 
   container.innerHTML = "";
 
   if (!data.results || data.results.length === 0) {
-    container.innerHTML = "<p>No results found.</p>";
+    container.innerHTML = "<div class='muted'>No batch results found.</div>";
     return;
   }
 
@@ -79,28 +188,34 @@ function renderBatchResults(data) {
     title.textContent = doc.filename || `Document ${index + 1}`;
 
     const meta = document.createElement("div");
+    meta.className = "batch-meta";
+
+    const status = (doc.status || "completed").toLowerCase();
+    const badgeClass = status === "completed" ? "ok" : (status === "processing" ? "warn" : "bad");
+
+    const pagesCount = (doc.pages && doc.pages.length) ? doc.pages.length : "n/a";
+    const tablesCount = (doc.pages || []).reduce((a, p) => a + ((p.tables || []).length), 0);
+
     meta.innerHTML = `
-      <strong>Status:</strong> ${doc.status || "completed"} |
-      <strong>Text Length:</strong> ${(doc.text || "").length}
+      <span class="badge ${badgeClass}">${escapeHtml(status.toUpperCase())}</span>
+      <span>Pages: ${escapeHtml(pagesCount)}</span>
+      <span>Tables: ${escapeHtml(tablesCount)}</span>
     `;
 
     card.appendChild(title);
     card.appendChild(meta);
 
     card.addEventListener("click", () => {
-      $("fields").textContent = prettyJson(doc.fields || {});
-      $("text").textContent = doc.text || "";
-      $("analysis").textContent = prettyJson(doc.analysis || {});
+      Array.from(container.querySelectorAll(".batch-card")).forEach(x => x.classList.remove("active"));
+      card.classList.add("active");
+      renderDoc(doc);
     });
 
     container.appendChild(card);
+    if (index === 0) card.classList.add("active");
   });
 
-  // auto show first
-  const first = data.results[0];
-  $("fields").textContent = prettyJson(first.fields || {});
-  $("text").textContent = first.text || "";
-  $("analysis").textContent = prettyJson(first.analysis || {});
+  renderDoc(data.results[0]);
 }
 
 async function runBatchOCR() {
@@ -128,6 +243,7 @@ async function runBatchOCR() {
     if (!res.ok) {
       setStatus("Error");
       console.error(data);
+      alert("Batch OCR failed. Check server logs.");
       return;
     }
 
@@ -189,4 +305,5 @@ window.addEventListener("DOMContentLoaded", () => {
   if ($("run")) $("run").addEventListener("click", runSingleOCR);
   if ($("batch")) $("batch").addEventListener("click", runBatchOCR);
   if ($("docx")) $("docx").addEventListener("click", downloadDocx);
+  if ($("json_download")) $("json_download").addEventListener("click", downloadCurrentJson);
 });
