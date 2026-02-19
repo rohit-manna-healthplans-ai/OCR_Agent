@@ -1,139 +1,93 @@
+from __future__ import annotations
 
-"""
-Enterprise Key-Value Extraction (stable, UI-safe)
+from typing import Any, Dict, Callable, Optional, List, Tuple
 
-Goals:
-- Stop junk pairs from URL bar / taskbar
-- Prefer form-like key/value from main content
-- Keep backward compatible return shape
+import numpy as np
 
-Important:
-- Screen OCR captures *everything* in regions; this extractor is only for "fields" (business KV).
-"""
-
-from typing import Dict, Any, List
-import re
-
-# Broad but safe keywords (case-insensitive)
-KEYWORDS = [
-    # Generic
-    "name", "address", "email", "phone", "mobile", "tel", "fax",
-    "date", "dob", "gender", "age", "id", "member id", "policy", "claim", "status", "type",
-    "provider", "doctor", "patient", "received", "assigned", "code", "description",
-    # Billing/Amounts
-    "invoice", "bill", "amount", "total", "subtotal", "tax", "gst", "vat", "due", "paid",
-    # Banking/IDs
-    "account", "ifsc", "swift", "utr", "pan", "aadhaar", "passport", "license",
-]
-
-_URL_RE = re.compile(r"(https?://|www\.)|(\.[a-z]{2,}/)", re.I)
-_TIME_RE = re.compile(r"\b\d{1,2}:\d{2}\s?(am|pm)\b", re.I)
-_TASKBAR_RE = re.compile(r"\b(qsearch|eng|mostly[- ]clear|wifi|battery)\b", re.I)
+from ocr.boxed_fields import detect_char_boxes, group_boxes_into_rows, boxes_to_sequences, Box
 
 
-def _clean(t: str) -> str:
-    return re.sub(r"\s+", " ", (t or "").strip())
+def _crop(img_rgb: np.ndarray, box: Box) -> np.ndarray:
+    H, W = img_rgb.shape[:2]
+    b = box.pad(4, W, H)
+    return img_rgb[b.y1:b.y2, b.x1:b.x2].copy()
 
 
-def _avg_conf(words: List[dict]) -> float:
-    if not words:
-        return 0.0
-    return sum(float(w.get("conf", 0)) for w in words) / len(words)
-
-
-def _contains_keyword(text: str) -> bool:
-    t = (text or "").lower()
-    return any(k in t for k in KEYWORDS)
-
-
-def _digit_ratio(text: str) -> float:
-    t = text or ""
-    if not t:
-        return 0.0
-    return sum(c.isdigit() for c in t) / max(1, len(t))
-
-
-def _is_ui_noise(text: str) -> bool:
-    t = (text or "").strip()
-    if not t:
-        return True
-    if _URL_RE.search(t):
-        return True
-    if _TIME_RE.search(t):
-        return True
-    if _TASKBAR_RE.search(t):
-        return True
-    return False
-
-
-def extract_fields_from_page(page: Dict[str, Any], image_rgb=None, recognize_char_fn=None) -> Dict[str, Any]:
+def extract_boxed_block_text(
+    img_rgb: np.ndarray,
+    recognize_char_fn: Callable[[np.ndarray], Dict[str, Any]],
+) -> List[Dict[str, Any]]:
     """
-    Returns:
-      {"pairs": [...], "total_pairs": n, "engine": "enterprise_kv_v1"}
+    Detects box sequences and reads each box as a single character.
+    Returns a list of sequences with text + bbox.
     """
-    lines = page.get("lines", [])
-    pairs = []
+    boxes = detect_char_boxes(img_rgb)
+    rows = group_boxes_into_rows(boxes)
+    seqs = boxes_to_sequences(rows)
 
-    # PASS 1: Form-ish "Label: Value" only if label looks like a field (keyword or short alpha label)
-    for line in lines:
-        words = line.get("words", [])
-        lt = _clean(" ".join((w.get("text") or "") for w in words))
-        if not lt or _is_ui_noise(lt):
+    out: List[Dict[str, Any]] = []
+    for seq in seqs:
+        chars = []
+        confs = []
+        x1 = min(b.x1 for b in seq)
+        y1 = min(b.y1 for b in seq)
+        x2 = max(b.x2 for b in seq)
+        y2 = max(b.y2 for b in seq)
+        for b in seq:
+            crop = _crop(img_rgb, b)
+            r = recognize_char_fn(crop) or {}
+            ch = (r.get("text") or "").strip()
+            if ch:
+                chars.append(ch[0])
+            else:
+                chars.append("")  # keep position
+            c = r.get("conf")
+            if isinstance(c, (int, float)):
+                confs.append(float(c))
+        text = "".join(chars).strip()
+        avg_conf = sum(confs) / max(1, len(confs)) if confs else 0.0
+        if len(seq) >= 4:  # ignore tiny noise sequences
+            out.append({"text": text, "conf": avg_conf, "bbox": [x1, y1, x2, y2], "n_boxes": len(seq)})
+    return out
+
+
+def extract_fields_from_page(
+    page: Dict[str, Any],
+    page_img_rgb: np.ndarray,
+    recognizer_fn: Optional[Callable[[np.ndarray], str]] = None,
+    recognize_char_fn: Optional[Callable[[np.ndarray], Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    Your project already does key/value extraction from OCR lines.
+    This function adds: boxed/block-letter extraction as extra signal.
+    We DO NOT overwrite existing fields; we attach boxed sequences under "__boxed_sequences".
+    """
+    fields: Dict[str, Any] = {}
+
+    # Existing heuristic key/value extraction using OCR lines (light)
+    # We keep it minimal to avoid breaking your current behavior.
+    lines = page.get("lines", []) or []
+    for ln in lines:
+        txt = (ln.get("text") or "").strip()
+        if not txt:
             continue
+        low = txt.lower()
+        # Simple examples; your repo may already have better rules.
+        if "policy" in low and "no" in low and "policy" not in fields:
+            fields["Policy No"] = txt.split(":")[-1].strip() if ":" in txt else txt
 
-        if ":" in lt:
-            k, v = lt.split(":", 1)
-            key = _clean(k)
-            val = _clean(v)
-            if len(key) < 2 or len(val) < 1:
-                continue
-            if _is_ui_noise(key) or _is_ui_noise(val):
-                continue
-            if not (_contains_keyword(key) or (len(key) <= 22 and _digit_ratio(key) < 0.2)):
-                continue
+        if ("name" in low) and ("full" not in low) and ("insured" in low or low.startswith("name")) and "Name" not in fields:
+            fields["Name"] = txt.split(":")[-1].strip() if ":" in txt else txt
 
-            conf = _avg_conf(words)
-            pairs.append({"key": key, "value": val, "confidence": round(min(1.0, conf), 3), "method": "inline_colon"})
+        if "address" in low and "Address" not in fields:
+            fields["Address"] = txt.split(":")[-1].strip() if ":" in txt else txt
 
-    # PASS 2: Right-aligned (only when left part has keyword-ish label)
-    for line in lines:
-        words = line.get("words", [])
-        if len(words) < 3:
-            continue
-        lt = _clean(" ".join((w.get("text") or "") for w in words))
-        if not lt or _is_ui_noise(lt):
-            continue
+        if "pincode" in low and "Pincode" not in fields:
+            fields["Pincode"] = txt.split(":")[-1].strip() if ":" in txt else txt
 
-        ws = sorted(words, key=lambda w: w["bbox"][0])
-        mid_x = sum(w["bbox"][0] for w in ws) / len(ws)
-        key_words = [w for w in ws if w["bbox"][2] < mid_x]
-        val_words = [w for w in ws if w["bbox"][0] >= mid_x]
-        if not key_words or not val_words:
-            continue
+    # Add boxed sequences (block letters)
+    if recognize_char_fn is not None:
+        boxed = extract_boxed_block_text(page_img_rgb, recognize_char_fn=recognize_char_fn)
+        fields["__boxed_sequences"] = boxed
 
-        key = _clean(" ".join((w.get("text") or "") for w in key_words))
-        val = _clean(" ".join((w.get("text") or "") for w in val_words))
-
-        if len(key) < 2 or len(val) < 1:
-            continue
-        if _is_ui_noise(key) or _is_ui_noise(val):
-            continue
-        if not (_contains_keyword(key) or (len(key) <= 22 and _digit_ratio(key) < 0.2)):
-            continue
-        if _digit_ratio(key) > 0.5:
-            continue
-
-        conf = (_avg_conf(key_words) + _avg_conf(val_words)) / 2.0
-        pairs.append({"key": key, "value": val, "confidence": round(min(1.0, conf), 3), "method": "right_aligned"})
-
-    # Dedup
-    unique = []
-    seen = set()
-    for p in pairs:
-        sig = (p["key"].lower(), p["value"].lower())
-        if sig in seen:
-            continue
-        seen.add(sig)
-        unique.append(p)
-
-    return {"pairs": unique, "total_pairs": len(unique), "engine": "enterprise_kv_v1"}
+    return fields

@@ -22,9 +22,9 @@ def _get_layout_engine() -> Optional[Any]:
         return None
     # show_log False, lang=en. Use "en" where supported.
     try:
-        _LAYOUT_ENGINE = PPStructure(layout=True, table=True, ocr=True, show_log=False, lang="en")
+        _LAYOUT_ENGINE = PPStructure(show_log=False, lang="en")
     except TypeError:
-        _LAYOUT_ENGINE = PPStructure(layout=True, table=True, ocr=True, show_log=False)
+        _LAYOUT_ENGINE = PPStructure(show_log=False)
     return _LAYOUT_ENGINE
 
 
