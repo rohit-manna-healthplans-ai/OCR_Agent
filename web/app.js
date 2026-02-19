@@ -24,69 +24,139 @@ function downloadJson(filename, obj){
   a.remove();
 }
 
-let lastRaw = null;
-let lastStructured = null;
+function getExtractedText(result){
+  // Project standard: raw extracted OCR text is result.text
+  return (result && typeof result.text === "string") ? result.text : "";
+}
+
+function getStructured(result){
+  // Project standard: structured JSON is result.structured
+  return (result && result.structured) ? result.structured : null;
+}
+
+let batchResults = []; // each item: { filename, ...run_ocr_result }
+
+function populatePicker(){
+  const picker = $("resultPicker");
+  if (!picker) return;
+  picker.innerHTML = "";
+  if (!batchResults.length){
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "(no results)";
+    picker.appendChild(opt);
+    picker.disabled = true;
+    return;
+  }
+  picker.disabled = false;
+  batchResults.forEach((r, idx) => {
+    const opt = document.createElement("option");
+    opt.value = String(idx);
+    opt.textContent = r.filename || `file_${idx+1}`;
+    picker.appendChild(opt);
+  });
+  picker.value = "0";
+}
+
+function renderSelected(){
+  const picker = $("resultPicker");
+  const idx = picker && picker.value ? parseInt(picker.value, 10) : 0;
+  const r = batchResults[idx] || null;
+
+  const extracted = r ? getExtractedText(r) : "";
+  const structured = r ? getStructured(r) : null;
+
+  $("extractedText").textContent = extracted || "";
+  $("structuredJson").textContent = structured ? pretty(structured) : "";
+  $("rawJson").textContent = r ? pretty(r) : "";
+
+  // wire download buttons for selected
+  const rawBtn = $("downloadCurrentRawBtn");
+  const structBtn = $("downloadCurrentStructuredBtn");
+  if (rawBtn){
+    rawBtn.onclick = () => {
+      if (!r) return;
+      downloadJson((r.filename || "result") + ".raw.json", r);
+    };
+  }
+  if (structBtn){
+    structBtn.onclick = () => {
+      if (!r) return;
+      downloadJson((r.filename || "result") + ".structured.json", structured || {});
+    };
+  }
+}
 
 async function run(){
-  const file = $("file").files[0];
-  if (!file){
+  const files = $("file").files;
+  if (!files || files.length === 0){
     setStatus("Select a file first", "warn");
+    return;
+  }
+  if (files.length > 10){
+    setStatus("Batch limit is 10 files. Please select max 10.", "warn");
     return;
   }
 
   const engine = $("engine").value || "auto";
   const enableOllama = $("enableOllama").checked ? "true" : "false";
 
+  // Decide endpoint based on number of files
+  const isBatch = files.length > 1;
+  const endpoint = isBatch ? "/ocr-batch" : "/ocr";
+
   const fd = new FormData();
-  fd.append("file", file);
-
-  setStatus("Running OCR...", "warn");
-
-  try{
-    const url = new URL("http://127.0.0.1:8000/ocr");
-    url.searchParams.set("engine", engine);
-    url.searchParams.set("enable_ollama", enableOllama);
-    url.searchParams.set("return_debug", "true");
-    url.searchParams.set("return_layout", "true");
-
-    const resp = await fetch(url.toString(), { method: "POST", body: fd });
-    if (!resp.ok){
-      const txt = await resp.text();
-      throw new Error(`HTTP ${resp.status}: ${txt}`);
+  if (isBatch){
+    for (const f of files){
+      fd.append("files", f);
     }
-    const data = await resp.json();
+  } else {
+    fd.append("file", files[0]);
+  }
 
-    lastRaw = data;
-    lastStructured = data?.structured ?? null;
+  setStatus(isBatch ? `Running batch OCR (${files.length} files)...` : "Running OCR...", "warn");
 
-    $("extractedText").textContent = (data?.text ?? "").toString();
-    $("structuredJson").textContent = pretty(lastStructured ?? {});
-    $("rawJson").textContent = pretty(lastRaw ?? {});
+  const qs = new URLSearchParams({
+    engine,
+    enable_ollama: enableOllama
+  });
 
-    setStatus("Done", "ok");
-  }catch(e){
-    setStatus("Error: " + (e?.message || e), "bad");
+  try {
+    const res = await fetch(`${endpoint}?${qs.toString()}`, { method: "POST", body: fd });
+    const data = await res.json();
+
+    if (!res.ok){
+      setStatus("Error: " + (data && data.detail ? data.detail : res.statusText), "bad");
+      return;
+    }
+
+    if (isBatch){
+      batchResults = Array.isArray(data.results) ? data.results : [];
+      populatePicker();
+      renderSelected();
+      setStatus(`Done. ${batchResults.length} results.`, "ok");
+    } else {
+      batchResults = [{ filename: files[0].name, ...data }];
+      populatePicker();
+      renderSelected();
+      setStatus("Done.", "ok");
+    }
+  } catch (e){
+    setStatus("Request failed: " + (e && e.message ? e.message : String(e)), "bad");
   }
 }
 
-function clearAll(){
-  lastRaw = null;
-  lastStructured = null;
-  $("extractedText").textContent = "";
-  $("structuredJson").textContent = "";
-  $("rawJson").textContent = "";
-  setStatus("Idle");
-}
+// Init handlers
+document.addEventListener("DOMContentLoaded", () => {
+  const runBtn = $("runBtn");
+  if (runBtn) runBtn.addEventListener("click", run);
 
-$("run").addEventListener("click", run);
-$("clear").addEventListener("click", clearAll);
+  const picker = $("resultPicker");
+  if (picker) picker.addEventListener("change", renderSelected);
 
-$("downloadRaw").addEventListener("click", ()=>{
-  if (!lastRaw) return setStatus("No result to download", "warn");
-  downloadJson("ocr_raw.json", lastRaw);
-});
-
-$("downloadStructured").addEventListener("click", ()=>{
-  if (!lastStructured) return setStatus("No structured JSON to download", "warn");
-  downloadJson("ocr_structured.json", lastStructured);
+  // initial
+  batchResults = [];
+  populatePicker();
+  renderSelected();
+  setStatus("Idle", "ok");
 });

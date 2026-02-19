@@ -5,7 +5,7 @@ import os
 import time
 import urllib.request
 import urllib.error
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 DEFAULT_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
@@ -15,16 +15,37 @@ class OllamaError(RuntimeError):
     pass
 
 
+def _strip_code_fences(s: str) -> str:
+    s = (s or "").strip()
+    # Handles ```json ... ``` or ``` ... ```
+    if s.startswith("```"):
+        # remove first fence line
+        parts = s.split("\n", 1)
+        s = parts[1] if len(parts) > 1 else ""
+        # remove trailing fence
+        s = s.rsplit("```", 1)[0].strip()
+    return s.strip()
+
+
 def ollama_generate_json(
     prompt: str,
     model: str = "phi3",
     base_url: str = DEFAULT_OLLAMA_URL,
-    timeout_s: int = 60,
+    timeout_s: int = 300,
     temperature: float = 0.0,
     top_p: float = 0.9,
-    num_predict: int = 900,
+    num_predict: int = 700,
+    retries: int = 2,
+    retry_backoff_s: float = 1.25,
 ) -> Dict[str, Any]:
-    """Call Ollama /api/generate and parse STRICT JSON returned by the model."""
+    """Call Ollama /api/generate and parse STRICT JSON returned by the model.
+
+    Reliability improvements:
+      - longer default timeout (300s)
+      - small retry with backoff
+      - strips markdown code fences if model returns them
+      - salvage first {...} if needed
+    """
     url = f"{base_url.rstrip('/')}/api/generate"
     payload = {
         "model": model,
@@ -38,7 +59,7 @@ def ollama_generate_json(
         },
     }
 
-    data = json.dumps(payload).encode("utf-8")
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=data,
@@ -46,13 +67,23 @@ def ollama_generate_json(
         method="POST",
     )
 
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-    except urllib.error.URLError as e:
-        raise OllamaError(f"Ollama request failed: {e}") from e
-    except Exception as e:
-        raise OllamaError(f"Ollama request failed: {e}") from e
+    last_err: Optional[Exception] = None
+    for attempt in range(max(1, int(retries) + 1)):
+        try:
+            with urllib.request.urlopen(req, timeout=float(timeout_s)) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+            last_err = None
+            break
+        except urllib.error.URLError as e:
+            last_err = e
+        except Exception as e:
+            last_err = e
+
+        if attempt < int(retries):
+            time.sleep(retry_backoff_s * (2 ** attempt))
+
+    if last_err is not None:
+        raise OllamaError(f"Ollama request failed: {last_err}") from last_err
 
     try:
         envelope = json.loads(raw)
@@ -62,6 +93,8 @@ def ollama_generate_json(
     text = (envelope.get("response") or "").strip()
     if not text:
         raise OllamaError(f"Empty Ollama response. Keys={list(envelope.keys())}")
+
+    text = _strip_code_fences(text)
 
     try:
         return json.loads(text)

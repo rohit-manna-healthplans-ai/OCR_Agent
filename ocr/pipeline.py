@@ -237,7 +237,7 @@ def run_ocr(
                         out,
                         model=os.getenv("OLLAMA_MODEL", "phi3"),
                         base_url=os.getenv("OLLAMA_URL", "http://127.0.0.1:11434"),
-                        timeout_s=int(os.getenv("OLLAMA_TIMEOUT_S", "60")),
+                        timeout_s=int(os.getenv("OLLAMA_TIMEOUT_S", "300")),
                     )
                 except Exception as _e:
                     out["ollama"] = {"available": False, "error": str(_e)}
@@ -351,7 +351,7 @@ def run_ocr(
                 out,
                 model=os.getenv("OLLAMA_MODEL", "phi3"),
                 base_url=os.getenv("OLLAMA_URL", "http://127.0.0.1:11434"),
-                timeout_s=int(os.getenv("OLLAMA_TIMEOUT_S", "60")),
+                timeout_s=int(os.getenv("OLLAMA_TIMEOUT_S", "300")),
             )
         except Exception as _e:
             out["ollama"] = {"available": False, "error": str(_e)}

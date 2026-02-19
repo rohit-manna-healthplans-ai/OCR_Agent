@@ -43,6 +43,21 @@
       <button class="btn ghost" id="clear">Clear</button>
     </div>
 
+    
+    <div class="panel">
+      <h3>Batch Results</h3>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+        <label style="opacity:0.85">Selected file:</label>
+        <select id="resultPicker" class="btn" style="min-width:280px"></select>
+        <button class="btn" id="downloadCurrentRawBtn" type="button">Download Raw JSON (Selected)</button>
+        <button class="btn" id="downloadCurrentStructuredBtn" type="button">Download Structured JSON (Selected)</button>
+      </div>
+      <div style="opacity:0.75;font-size:12px;margin-top:8px">
+        Tip: Select multiple files (max 10) and click Run. UI will call <code>/ocr-batch</code> automatically.
+      </div>
+    </div>
+
+
     <div class="panel">
       <h3>Extracted Text (formatted)</h3>
       <pre id="extractedText"></pre>
