@@ -194,6 +194,7 @@ def run_ocr(
     return_debug: bool = True,
     engine: str = "auto",
     return_layout: bool = True,
+    enable_ollama: bool = True,
 ) -> Dict[str, Any]:
     p = Path(input_path)
     if not p.exists():
@@ -228,6 +229,20 @@ def run_ocr(
             out["text"] = normalize_linebreaks(out.get("text") or "")
             out["analysis"] = analyze_result(out)
 
+
+            # Optional Ollama postprocess (LLM structuring) - does NOT affect raw OCR text
+            if enable_ollama and os.getenv("DISABLE_OLLAMA", "0") not in ("1", "true", "True"):
+                try:
+                    out["ollama"] = postprocess_with_ollama(
+                        out,
+                        model=os.getenv("OLLAMA_MODEL", "phi3"),
+                        base_url=os.getenv("OLLAMA_URL", "http://127.0.0.1:11434"),
+                        timeout_s=int(os.getenv("OLLAMA_TIMEOUT_S", "60")),
+                    )
+                except Exception as _e:
+                    out["ollama"] = {"available": False, "error": str(_e)}
+            else:
+                out["ollama"] = {"available": False, "error": "disabled"}
             out["structured"] = build_final_json(out)
             return out
 
@@ -328,5 +343,19 @@ def run_ocr(
 
     out["analysis"] = analyze_result(out)
 
+
+    # Optional Ollama postprocess (LLM structuring) - does NOT affect raw OCR text
+    if enable_ollama and os.getenv("DISABLE_OLLAMA", "0") not in ("1", "true", "True"):
+        try:
+            out["ollama"] = postprocess_with_ollama(
+                out,
+                model=os.getenv("OLLAMA_MODEL", "phi3"),
+                base_url=os.getenv("OLLAMA_URL", "http://127.0.0.1:11434"),
+                timeout_s=int(os.getenv("OLLAMA_TIMEOUT_S", "60")),
+            )
+        except Exception as _e:
+            out["ollama"] = {"available": False, "error": str(_e)}
+    else:
+        out["ollama"] = {"available": False, "error": "disabled"}
     out["structured"] = build_final_json(out)
     return out

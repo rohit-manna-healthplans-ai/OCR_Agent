@@ -51,7 +51,8 @@ def postprocess_with_ollama(
     prompt = {
         "task": "You are an advanced OCR structuring engine.",
         "rules": [
-            "DO NOT remove or omit any text.",
+            "DO NOT remove or omit any text from full_text.",
+            "corrected_text MUST retain every original word (you may fix spelling/grammar but do not delete content).",
             "Return STRICT JSON only.",
             "Identify header, footer, navigation panels, active tabs.",
             "Preserve tables accurately.",

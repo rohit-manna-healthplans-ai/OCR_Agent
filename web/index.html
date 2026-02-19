@@ -3,150 +3,60 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>OCR Viewer</title>
+  <title>OCR Agent</title>
   <link rel="stylesheet" href="styles.css" />
+  <style>
+    .wrap{max-width:1100px;margin:24px auto;padding:0 16px}
+    .topbar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
+    .topbar .spacer{flex:1}
+    .panel{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:14px;padding:14px;margin:12px 0}
+    .panel h3{margin:0 0 10px 0;font-size:14px;opacity:0.9}
+    pre{white-space:pre-wrap;word-break:break-word;max-height:420px;overflow:auto;background:rgba(0,0,0,0.25);padding:12px;border-radius:12px;border:1px solid rgba(255,255,255,0.08)}
+    .btn{padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:inherit;cursor:pointer}
+    .btn.primary{background:rgba(99,102,241,0.35);border-color:rgba(99,102,241,0.55)}
+    .btn.ghost{background:transparent}
+    .pill{padding:6px 10px;border-radius:999px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.10);font-size:12px}
+    select,input[type="file"]{padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,0.12);background:rgba(0,0,0,0.25);color:inherit}
+    label{font-size:12px;opacity:0.85}
+  </style>
 </head>
 <body>
-  <div class="layout">
-    <aside class="side">
-      <div class="side__brand">
-        <div>
-          <div class="brand__title">OCR Viewer</div>
-          <div class="brand__sub">FastAPI • PaddleOCR • Tesseract</div>
-        </div>
-        <div id="status" class="pill">Idle</div>
-      </div>
+  <div class="wrap">
+    <div class="topbar">
+      <div style="font-weight:700">OCR Agent</div>
+      <div class="pill" id="status">Idle</div>
+      <div class="spacer"></div>
 
-      <div class="card">
-        <div class="card__title">Upload</div>
-        <div class="row">
-          <input id="files" type="file" multiple />
-        </div>
-        <div class="row row--2">
-          <select id="engine" aria-label="Engine">
-            <option value="auto">Auto</option>
-            <option value="paddle">Paddle</option>
-            <option value="tesseract">Tesseract</option>
-          </select>
-          <button id="run" type="button">Single OCR</button>
-        </div>
-        <div class="row row--2">
-          <button id="batch" type="button" class="ghost">Batch OCR</button>
-          <button id="docx" type="button" class="ghost">DOCX</button>
-        </div>
-        <div class="row row--2">
-          <button id="json_download" type="button" class="ghost">Download JSON</button>
-          <button id="clear" type="button" class="danger ghost">Clear</button>
-        </div>
-        <div class="hint">Tip: Batch list se document select karo. Tabs me output dekho.</div>
-      </div>
+      <input id="file" type="file" />
+      <select id="engine" aria-label="Engine">
+        <option value="auto">Auto</option>
+        <option value="paddle">Paddle</option>
+        <option value="tesseract">Tesseract</option>
+      </select>
+      <label style="display:flex;align-items:center;gap:8px">
+        <input id="enableOllama" type="checkbox" checked />
+        Enable LLM (Ollama)
+      </label>
+      <button class="btn primary" id="run">Run OCR</button>
+      <button class="btn ghost" id="downloadRaw">Download Raw JSON</button>
+      <button class="btn ghost" id="downloadStructured">Download Structured JSON</button>
+      <button class="btn ghost" id="clear">Clear</button>
+    </div>
 
-      <div class="card">
-        <div class="card__title">Batch Documents</div>
-        <div id="batch_results" class="batch"></div>
-      </div>
-    </aside>
+    <div class="panel">
+      <h3>Extracted Text (formatted)</h3>
+      <pre id="extractedText"></pre>
+    </div>
 
-    <main class="main">
-      <header class="top">
-        <div class="top__left">
-          <div id="doc_title" class="doc__title">No document loaded</div>
-          <div id="doc_meta" class="doc__meta"></div>
-        </div>
-        <div class="top__right">
-          <input id="search" class="search" placeholder="Search in current view…" />
-        </div>
-      </header>
+    <div class="panel">
+      <h3>LLM Structured JSON</h3>
+      <pre id="structuredJson"></pre>
+    </div>
 
-      <nav class="tabs" aria-label="Output tabs">
-        <button class="tab is-active" data-tab="page" type="button">Page View</button>
-        <button class="tab" data-tab="fields" type="button">Fields</button>
-        <button class="tab" data-tab="text" type="button">Text</button>
-        <button class="tab" data-tab="tables" type="button">Tables</button>
-        <button class="tab" data-tab="human" type="button">Human JSON</button>
-        <button class="tab" data-tab="json" type="button">Raw JSON</button>
-        <button class="tab" data-tab="analysis" type="button">Analysis</button>
-      </nav>
-
-      <section class="content">
-        <section class="panel" id="panel-page" data-panel="page">
-          <div class="panel__head">
-            <div class="panel__title">Page View (Headings/Bold)</div>
-            <div class="panel__actions">
-              <select id="page_select" class="mini ghost" aria-label="Select page"></select>
-              <button class="mini ghost" data-copy="page_md" type="button">Copy MD</button>
-            </div>
-          </div>
-          <div class="split">
-            <div class="split__col">
-              <div class="split__label">Rendered</div>
-              <div id="page_render" class="render"></div>
-            </div>
-            <div class="split__col">
-              <div class="split__label">Markdown</div>
-              <pre id="page_md" class="pre"></pre>
-            </div>
-          </div>
-        </section>
-
-        <section class="panel" id="panel-fields" data-panel="fields" hidden>
-          <div class="panel__head">
-            <div class="panel__title">Extracted Fields</div>
-            <div class="panel__actions">
-              <button class="mini ghost" data-copy="fields" type="button">Copy</button>
-            </div>
-          </div>
-          <pre id="fields" class="pre"></pre>
-        </section>
-
-        <section class="panel" id="panel-text" data-panel="text" hidden>
-          <div class="panel__head">
-            <div class="panel__title">OCR Text (Plain)</div>
-            <div class="panel__actions">
-              <button class="mini ghost" data-copy="text" type="button">Copy</button>
-            </div>
-          </div>
-          <pre id="text" class="pre"></pre>
-        </section>
-
-        <section class="panel" id="panel-tables" data-panel="tables" hidden>
-          <div class="panel__head">
-            <div class="panel__title">Tables</div>
-          </div>
-          <div id="tables" class="tables"></div>
-        </section>
-
-        <section class="panel" id="panel-human" data-panel="human" hidden>
-          <div class="panel__head">
-            <div class="panel__title">Human Readable JSON</div>
-            <div class="panel__actions">
-              <button class="mini ghost" data-copy="human" type="button">Copy</button>
-            </div>
-          </div>
-          <pre id="human" class="pre"></pre>
-        </section>
-
-        <section class="panel" id="panel-json" data-panel="json" hidden>
-          <div class="panel__head">
-            <div class="panel__title">Raw JSON</div>
-            <div class="panel__actions">
-              <button class="mini ghost" data-copy="json" type="button">Copy</button>
-            </div>
-          </div>
-          <pre id="json" class="pre"></pre>
-        </section>
-
-        <section class="panel" id="panel-analysis" data-panel="analysis" hidden>
-          <div class="panel__head">
-            <div class="panel__title">Analysis</div>
-            <div class="panel__actions">
-              <button class="mini ghost" data-copy="analysis" type="button">Copy</button>
-            </div>
-          </div>
-          <pre id="analysis" class="pre"></pre>
-        </section>
-      </section>
-    </main>
+    <div class="panel">
+      <h3>Raw JSON</h3>
+      <pre id="rawJson"></pre>
+    </div>
   </div>
 
   <script src="app.js"></script>

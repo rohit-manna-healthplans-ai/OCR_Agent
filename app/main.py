@@ -48,6 +48,7 @@ async def ocr_endpoint(
     max_pages: int = Query(default=5, ge=1, le=200),
     return_debug: bool = Query(default=True),
     return_layout: bool = Query(default=True),
+    enable_ollama: bool = Query(default=True),
 ):
     suffix = Path(file.filename or "upload").suffix.lower()
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -68,6 +69,7 @@ async def ocr_endpoint(
             return_debug=return_debug,
             engine=engine,
             return_layout=return_layout,
+            enable_ollama=enable_ollama,
         )
         return JSONResponse(content=result)
     finally:
@@ -86,6 +88,7 @@ async def ocr_batch_endpoint(
     max_pages: int = Query(default=5, ge=1, le=200),
     return_debug: bool = Query(default=True),
     return_layout: bool = Query(default=True),
+    enable_ollama: bool = Query(default=True),
 ):
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded.")
@@ -113,6 +116,7 @@ async def ocr_batch_endpoint(
                 return_debug=return_debug,
                 engine=engine,
                 return_layout=return_layout,
+                enable_ollama=enable_ollama,
             )
             results.append({"filename": f.filename, **r})
 
@@ -150,6 +154,7 @@ async def ocr_docx_endpoint(
             return_debug=False,
             engine=engine,
             return_layout=False,
+            enable_ollama=False,
         )
 
         build_docx_from_result(result, str(out_path), title="OCR Output")
