@@ -40,7 +40,11 @@ from ocr.analyze import analyze_result  # noqa: E402
 from ocr.layout import analyze_layout  # noqa: E402
 from ocr.engine_router import route_engine, score_words  # noqa: E402
 from ocr.header_footer import detect_header_footer_from_page  # noqa: E402
-from ocr.sections import build_sections  # noqa: E402
+
+
+
+from ocr.llm_postprocess import postprocess_with_ollama
+from ocr.text_formatter import build_final_json
 
 
 def poly_to_xyxy(poly: Any) -> List[int]:
@@ -190,8 +194,6 @@ def run_ocr(
     return_debug: bool = True,
     engine: str = "auto",
     return_layout: bool = True,
-    table_extraction: str = "auto",   # auto|layout|heuristic|off
-    return_sections: bool = True,
 ) -> Dict[str, Any]:
     p = Path(input_path)
     if not p.exists():
@@ -208,8 +210,6 @@ def run_ocr(
         "mkldnn_disabled": True,
         "engine_requested": engine,
         "return_layout": bool(return_layout),
-        "table_extraction": str(table_extraction),
-        "return_sections": bool(return_sections),
     }
 
     if suffix == ".pdf":
@@ -223,11 +223,12 @@ def run_ocr(
             out["fields"] = {}
             for pg in out.get("pages", []):
                 pg["tables"] = []
-                pg["sections"] = [{"type":"text","bbox":[0,0,0,0],"text": (pg.get("text") or "")}]
                 pg["layout"] = {"available": False, "blocks": []}
                 pg["header_footer"] = {"available": False, "header_text": "", "footer_text": "", "header_lines_idx": [], "footer_lines_idx": []}
             out["text"] = normalize_linebreaks(out.get("text") or "")
             out["analysis"] = analyze_result(out)
+
+            out["structured"] = build_final_json(out)
             return out
 
         meta["digital_pdf"] = False
@@ -237,8 +238,6 @@ def run_ocr(
 
     page_results: List[PageResult] = []
     debug_info: List[dict] = []
-    processed_imgs: List[np.ndarray] = []  # per-page preprocessed image used for OCR
-
 
     first_page_img: Optional[np.ndarray] = None
     engine_used_first: Optional[str] = None
@@ -246,7 +245,6 @@ def run_ocr(
     for page_idx, img_rgb in enumerate(imgs):
         paddle_words, used_preset, used_img = _ocr_best_of_presets(img_rgb, preset=preset)
         meta["preset_used"] = used_preset
-        processed_imgs.append(used_img)
         if page_idx == 0:
             first_page_img = used_img
 
@@ -301,46 +299,21 @@ def run_ocr(
     for pg in out.get("pages", []):
         pg["text"] = normalize_linebreaks(pg.get("text") or "")
 
-    
-    # ---------- Layout (optional) ----------
-    table_mode = (table_extraction or "auto").lower().strip()
+    for pg in out.get("pages", []):
+        pg["tables"] = detect_tables_from_page(pg)
 
-    want_layout = bool(return_layout) or table_mode in ("auto", "layout") or bool(return_sections)
-    if want_layout:
+    for pg in out.get("pages", []):
+        pg["header_footer"] = detect_header_footer_from_page(pg)
+
+    if return_layout:
         for i, pg in enumerate(out.get("pages", [])):
-            # Run layout per page when possible. If PPStructure is unavailable this will return available=False.
-            # We pass the processed image for each page if we have it; currently we only keep first_page_img,
-            # so for non-first pages we skip (still safe) unless return_layout is explicitly requested.
-            if i < len(processed_imgs):
-                pg["layout"] = analyze_layout(processed_imgs[i])
+            if i == 0 and first_page_img is not None:
+                pg["layout"] = analyze_layout(first_page_img)
             else:
                 pg["layout"] = {"available": False, "blocks": []}
     else:
         for pg in out.get("pages", []):
             pg["layout"] = {"available": False, "blocks": []}
-
-    # ---------- Tables ----------
-    for pg in out.get("pages", []):
-        if table_mode == "off":
-            pg["tables"] = []
-        elif table_mode == "heuristic":
-            pg["tables"] = detect_tables_from_page(pg, prefer_layout=False)
-        elif table_mode == "layout":
-            pg["tables"] = detect_tables_from_page(pg, prefer_layout=True)
-        else:  # auto
-            pg["tables"] = detect_tables_from_page(pg, prefer_layout=True)
-
-    # ---------- Header / Footer ----------
-    for pg in out.get("pages", []):
-        pg["header_footer"] = detect_header_footer_from_page(pg)
-
-    # ---------- Sections ----------
-    if return_sections:
-        for pg in out.get("pages", []):
-            pg["sections"] = build_sections(pg)
-    else:
-        for pg in out.get("pages", []):
-            pg["sections"] = []
 
     if out.get("pages") and first_page_img is not None:
         def _char_fn(crop_rgb: np.ndarray) -> Dict[str, Any]:
@@ -354,4 +327,6 @@ def run_ocr(
         out["debug"] = debug_info
 
     out["analysis"] = analyze_result(out)
+
+    out["structured"] = build_final_json(out)
     return out
