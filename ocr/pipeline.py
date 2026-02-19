@@ -2,12 +2,15 @@ from __future__ import annotations
 
 """
 Fast + stable pipeline (Windows/Python 3.11):
-- PaddleOCR primary
-- Tesseract fallback (auto routing, less frequent for speed)
+
+- PaddleOCR pass for recall (word boxes)
+- Routing policy updated per requirement:
+    * Handwritten => PaddleOCR
+    * Printed => Tesseract (fallback to Paddle if Tesseract is extremely weak)
 - preset=auto uses only clean_doc (fast)
-- layout via PP-Structure (page 0 only, optional)
+- tables: multi-table detection (no OpenCV)
+- header/footer: detected from OCR line bboxes (no extra OCR pass)
 - analysis always returned
-- block letters boxes supported if your field_extract uses recognize_char_fn (kept)
 """
 
 import os
@@ -31,10 +34,12 @@ from ocr.preprocess import preprocess  # noqa: E402
 from ocr.postprocess import normalize_linebreaks, validate_fields  # noqa: E402
 from ocr.schemas import Word, Line, PageResult, to_dict  # noqa: E402
 from ocr.table_detect import detect_tables_from_page  # noqa: E402
-from ocr.tesseract_engine import run_tesseract, run_tesseract_single_char  # noqa: E402
+from ocr.tesseract_engine import run_tesseract_single_char  # noqa: E402
 from ocr.field_extract import extract_fields_from_page  # noqa: E402
 from ocr.analyze import analyze_result  # noqa: E402
 from ocr.layout import analyze_layout  # noqa: E402
+from ocr.engine_router import route_engine, score_words  # noqa: E402
+from ocr.header_footer import detect_header_footer_from_page  # noqa: E402
 
 
 def poly_to_xyxy(poly: Any) -> List[int]:
@@ -104,8 +109,7 @@ def get_paddle() -> Any:
     if _OCR_INSTANCE is not None:
         return _OCR_INSTANCE
 
-    # Lazy import: avoids paying import cost on app startup if OCR endpoint isn't called yet
-    from paddleocr import PaddleOCR
+    from paddleocr import PaddleOCR  # lazy import
 
     common_kwargs = dict(use_angle_cls=True, lang="en", show_log=False)
 
@@ -119,40 +123,9 @@ def get_paddle() -> Any:
         return _OCR_INSTANCE
     except TypeError:
         pass
+
     _OCR_INSTANCE = PaddleOCR(**common_kwargs)
     return _OCR_INSTANCE
-
-
-def _score_words(words: List[dict]) -> float:
-    if not words:
-        return 0.0
-    total_chars = sum(len((w.get("text") or "").strip()) for w in words)
-    avg_conf = sum(float(w.get("conf") or 0.0) for w in words) / max(1, len(words))
-    text = " ".join((w.get("text") or "") for w in words).lower()
-    bonus = 0.0
-    for kw in ["policy", "certificate", "company", "tpa", "name", "address", "city", "pincode", "pan", "ifsc"]:
-        if kw in text:
-            bonus += 0.25
-    return (avg_conf * (1.0 + min(6.0, total_chars / 200.0))) + bonus
-
-
-def _route_engine(img_rgb: np.ndarray, paddle_words: List[dict], force_engine: str = "auto") -> Tuple[str, List[dict]]:
-    force_engine = (force_engine or "auto").lower().strip()
-    if force_engine == "paddle":
-        return "paddleocr", paddle_words
-    if force_engine == "tesseract":
-        return "tesseract", run_tesseract(img_rgb)
-
-    # Speed-leaning: prefer Paddle if it's "good enough"
-    paddle_score = _score_words(paddle_words)
-    if paddle_score >= 0.60 and sum(len((w.get("text") or "")) for w in paddle_words) >= 60:
-        return "paddleocr", paddle_words
-
-    tess_words = run_tesseract(img_rgb)
-    tess_score = _score_words(tess_words)
-    if tess_score > paddle_score:
-        return "tesseract", tess_words
-    return "paddleocr", paddle_words
 
 
 def _read_image(path: str) -> np.ndarray:
@@ -196,13 +169,12 @@ def _paddle_words_on_image(img_rgb: np.ndarray) -> List[dict]:
 
 
 def _ocr_best_of_presets(img_rgb: np.ndarray, preset: str) -> Tuple[List[dict], str, np.ndarray]:
-    # FAST: auto only runs clean_doc
     presets = ["clean_doc"] if preset == "auto" else [preset]
     candidates = []
     for pr in presets:
         proc, used = preprocess(img_rgb, preset=pr)
         words = _paddle_words_on_image(proc)
-        score = _score_words(words)
+        score = score_words(words)
         candidates.append((score, used, words, proc))
     candidates.sort(key=lambda x: x[0], reverse=True)
     best = candidates[0]
@@ -247,6 +219,7 @@ def run_ocr(
             for pg in out.get("pages", []):
                 pg["tables"] = []
                 pg["layout"] = {"available": False, "blocks": []}
+                pg["header_footer"] = {"available": False, "header_text": "", "footer_text": "", "header_lines_idx": [], "footer_lines_idx": []}
             out["text"] = normalize_linebreaks(out.get("text") or "")
             out["analysis"] = analyze_result(out)
             return out
@@ -268,7 +241,15 @@ def run_ocr(
         if page_idx == 0:
             first_page_img = used_img
 
-        engine_used, final_words = _route_engine(used_img, paddle_words, force_engine=engine)
+        engine_req = (engine or "auto").lower().strip()
+        if engine_req == "paddle":
+            engine_used, final_words = "paddleocr(forced)", paddle_words
+        elif engine_req == "tesseract":
+            from ocr.tesseract_engine import run_tesseract  # local import
+            engine_used, final_words = "tesseract(forced)", run_tesseract(used_img)
+        else:
+            engine_used, final_words = route_engine(used_img, paddle_words, printed_engine="tesseract")
+
         if page_idx == 0:
             engine_used_first = engine_used
         meta["engine_used"] = engine_used_first or engine_used
@@ -302,7 +283,7 @@ def run_ocr(
                 "engine_used": engine_used,
                 "words_count": len(final_words),
                 "lines_count": len(lines),
-                "score": _score_words(final_words),
+                "score": score_words(final_words),
             })
 
     out = to_dict(page_results, meta)
@@ -311,11 +292,12 @@ def run_ocr(
     for pg in out.get("pages", []):
         pg["text"] = normalize_linebreaks(pg.get("text") or "")
 
-    # tables
     for pg in out.get("pages", []):
         pg["tables"] = detect_tables_from_page(pg)
 
-    # layout (page 0 only)
+    for pg in out.get("pages", []):
+        pg["header_footer"] = detect_header_footer_from_page(pg)
+
     if return_layout:
         for i, pg in enumerate(out.get("pages", [])):
             if i == 0 and first_page_img is not None:
@@ -326,7 +308,6 @@ def run_ocr(
         for pg in out.get("pages", []):
             pg["layout"] = {"available": False, "blocks": []}
 
-    # fields (page 0) + boxed single-char OCR
     if out.get("pages") and first_page_img is not None:
         def _char_fn(crop_rgb: np.ndarray) -> Dict[str, Any]:
             return run_tesseract_single_char(crop_rgb, whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")

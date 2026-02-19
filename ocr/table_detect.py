@@ -64,10 +64,26 @@ def _assign_to_col(x1: int, col_anchors: List[int]) -> int:
     return best_i
 
 
+def _looks_like_taskbar_or_banner(bbox: List[int], page_w: int, page_h: int, n_rows: int, n_cols: int) -> bool:
+    if page_w <= 0 or page_h <= 0:
+        return False
+    x1, y1, x2, y2 = bbox
+    bw = max(1, x2 - x1)
+    bh = max(1, y2 - y1)
+    wide = bw / float(page_w) >= 0.80
+    short = bh / float(page_h) <= 0.10
+    near_edge = (y1 / float(page_h) <= 0.07) or (y2 / float(page_h) >= 0.93)
+    low_structure = n_rows <= 3 and n_cols <= 3
+    return bool(wide and short and near_edge and low_structure)
+
+
 def detect_tables_from_page(page: Dict[str, Any]) -> List[Dict[str, Any]]:
     lines = page.get("lines") or []
     if not lines:
         return []
+
+    page_w = int(page.get("width") or 0)
+    page_h = int(page.get("height") or 0)
 
     words: List[Dict[str, Any]] = []
     for ln in lines:
@@ -81,58 +97,81 @@ def detect_tables_from_page(page: Dict[str, Any]) -> List[Dict[str, Any]]:
         return []
 
     heights = sorted(_height(w["bbox"]) for w in words)
-    med_h = heights[len(heights) // 2]
-    tol = max(10.0, min(40.0, med_h * 0.7))
+    med_h = heights[len(heights) // 2] if heights else 12
+    tol = max(10.0, min(40.0, med_h * 0.70))
 
     rows = _cluster_rows(words, tol=tol)
-
     candidate_rows = [r for r in rows if len(r) >= 2]
     if len(candidate_rows) < 3:
         return []
 
-    xs = []
-    for r in candidate_rows:
-        xs.extend([w["bbox"][0] for w in r])
+    # Split into groups by vertical gaps (multiple tables)
+    def row_y(row: List[Dict[str, Any]]) -> float:
+        return _center_y(row[0]["bbox"])
 
-    col_anchors = _cluster_columns(xs, tol=28)
-    if len(col_anchors) < 2:
-        return []
+    sorted_rows = sorted(candidate_rows, key=row_y)
+    gap_thr = max(2.4 * tol, med_h * 2.2)
 
-    if len(col_anchors) > 12:
-        col_anchors = col_anchors[:12]
-
-    grid: List[List[str]] = []
-    used_bboxes: List[List[int]] = []
-
-    for r in candidate_rows:
-        row_cells = [""] * len(col_anchors)
-        for w in r:
-            c = _assign_to_col(w["bbox"][0], col_anchors)
-            if row_cells[c]:
-                row_cells[c] = row_cells[c] + " " + w["text"]
+    groups: List[List[List[Dict[str, Any]]]] = []
+    current: List[List[Dict[str, Any]]] = []
+    prev_y = None
+    for r in sorted_rows:
+        y = row_y(r)
+        if prev_y is None:
+            current = [r]
+        else:
+            if abs(y - prev_y) > gap_thr and len(current) >= 3:
+                groups.append(current)
+                current = [r]
             else:
-                row_cells[c] = w["text"]
-            used_bboxes.append(w["bbox"])
+                current.append(r)
+        prev_y = y
+    if current and len(current) >= 3:
+        groups.append(current)
 
-        if sum(1 for x in row_cells if x.strip()) >= 2:
-            grid.append([x.strip() for x in row_cells])
+    tables: List[Dict[str, Any]] = []
 
-    if len(grid) < 3:
-        return []
+    for grp_rows in groups:
+        xs: List[int] = []
+        for r in grp_rows:
+            xs.extend([w["bbox"][0] for w in r])
+        col_anchors = _cluster_columns(xs, tol=28)
+        if len(col_anchors) < 2:
+            continue
+        if len(col_anchors) > 14:
+            col_anchors = col_anchors[:14]
 
-    col_keep = []
-    for j in range(len(col_anchors)):
-        if any((row[j] or "").strip() for row in grid):
-            col_keep.append(j)
-    grid = [[row[j] for j in col_keep] for row in grid]
-    n_cols = len(grid[0]) if grid else 0
-    if n_cols < 2:
-        return []
+        grid: List[List[str]] = []
+        used_bboxes: List[List[int]] = []
 
-    bbox = _bbox_union(used_bboxes) if used_bboxes else [0, 0, 0, 0]
-    return [{
-        "bbox": bbox,
-        "n_rows": len(grid),
-        "n_cols": n_cols,
-        "cells": grid,
-    }]
+        for r in grp_rows:
+            row_cells = [""] * len(col_anchors)
+            for w in r:
+                c = _assign_to_col(w["bbox"][0], col_anchors)
+                row_cells[c] = (row_cells[c] + " " + w["text"]).strip()
+                used_bboxes.append(w["bbox"])
+            if sum(1 for x in row_cells if x.strip()) >= 2:
+                grid.append([x.strip() for x in row_cells])
+
+        if len(grid) < 3:
+            continue
+
+        # Drop empty columns
+        col_keep = [j for j in range(len(grid[0])) if any((row[j] or "").strip() for row in grid)]
+        grid = [[row[j] for j in col_keep] for row in grid]
+        n_cols = len(grid[0]) if grid else 0
+        if n_cols < 2:
+            continue
+
+        bbox = _bbox_union(used_bboxes) if used_bboxes else [0, 0, 0, 0]
+        if _looks_like_taskbar_or_banner(bbox, page_w, page_h, n_rows=len(grid), n_cols=n_cols):
+            continue
+
+        tables.append({
+            "bbox": bbox,
+            "n_rows": len(grid),
+            "n_cols": n_cols,
+            "cells": grid,
+        })
+
+    return tables
