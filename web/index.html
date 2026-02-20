@@ -2,78 +2,83 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>OCR Agent</title>
-  <link rel="stylesheet" href="styles.css" />
-  <style>
-    .wrap{max-width:1100px;margin:24px auto;padding:0 16px}
-    .topbar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
-    .topbar .spacer{flex:1}
-    .panel{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:14px;padding:14px;margin:12px 0}
-    .panel h3{margin:0 0 10px 0;font-size:14px;opacity:0.9}
-    pre{white-space:pre-wrap;word-break:break-word;max-height:420px;overflow:auto;background:rgba(0,0,0,0.25);padding:12px;border-radius:12px;border:1px solid rgba(255,255,255,0.08)}
-    .btn{padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:inherit;cursor:pointer}
-    .btn.primary{background:rgba(99,102,241,0.35);border-color:rgba(99,102,241,0.55)}
-    .btn.ghost{background:transparent}
-    .pill{padding:6px 10px;border-radius:999px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.10);font-size:12px}
-    select,input[type="file"]{padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,0.12);background:rgba(0,0,0,0.25);color:inherit}
-    label{font-size:12px;opacity:0.85}
-  </style>
+  <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
   <div class="wrap">
-    <div class="topbar">
-      <div style="font-weight:700">OCR Agent</div>
-      <div class="pill" id="status">Idle</div>
-      <div class="spacer"></div>
-
-      <input id="file" type="file" />
-      <select id="engine" aria-label="Engine">
-        <option value="auto">Auto</option>
-        <option value="paddle">Paddle</option>
-        <option value="tesseract">Tesseract</option>
-      </select>
-      <label style="display:flex;align-items:center;gap:8px">
-        <input id="enableOllama" type="checkbox" checked />
-        Enable LLM (Ollama)
-      </label>
-      <button class="btn primary" id="run">Run OCR</button>
-      <button class="btn ghost" id="downloadRaw">Download Raw JSON</button>
-      <button class="btn ghost" id="downloadStructured">Download Structured JSON</button>
-      <button class="btn ghost" id="clear">Clear</button>
-    </div>
-
-    
-    <div class="panel">
-      <h3>Batch Results</h3>
-      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-        <label style="opacity:0.85">Selected file:</label>
-        <select id="resultPicker" class="btn" style="min-width:280px"></select>
-        <button class="btn" id="downloadCurrentRawBtn" type="button">Download Raw JSON (Selected)</button>
-        <button class="btn" id="downloadCurrentStructuredBtn" type="button">Download Structured JSON (Selected)</button>
+    <header class="top">
+      <div>
+        <h1>OCR Agent</h1>
+        <div class="sub">LLM disabled • Views: Extracted Text, Raw JSON, LLM JSON (placeholder), Images</div>
       </div>
-      <div style="opacity:0.75;font-size:12px;margin-top:8px">
-        Tip: Select multiple files (max 10) and click Run. UI will call <code>/ocr-batch</code> automatically.
+      <div id="status" class="status">Idle</div>
+    </header>
+
+    <section class="card">
+      <div class="row">
+        <div class="col">
+          <label class="lbl">Select files (batch supported, max 10)</label>
+          <input id="file" type="file" multiple />
+        </div>
+        <div class="col">
+          <label class="lbl">Engine</label>
+          <select id="engine">
+            <option value="auto" selected>auto</option>
+            <option value="tesseract">tesseract</option>
+            <option value="paddle">paddle</option>
+          </select>
+        </div>
+        <div class="col col-btn">
+          <button id="runBtn" class="btn">Run OCR</button>
+        </div>
       </div>
-    </div>
 
+      <div class="row">
+        <div class="col">
+          <label class="lbl">Selected result</label>
+          <select id="resultPicker"></select>
+        </div>
+        <div class="col col-btn">
+          <button id="downloadRawBtn" class="btn secondary">Download raw_json</button>
+        </div>
+      </div>
 
-    <div class="panel">
-      <h3>Extracted Text (formatted)</h3>
-      <pre id="extractedText"></pre>
-    </div>
+      <div class="hint">Tip: select multiple files and click Run. UI will call <code>/ocr-batch</code> automatically.</div>
+    </section>
 
-    <div class="panel">
-      <h3>LLM Structured JSON</h3>
-      <pre id="structuredJson"></pre>
-    </div>
+    <section class="card">
+      <div class="tabs" role="tablist" aria-label="Views">
+        <button class="tabbtn active" data-tab="tabText" role="tab">Extracted Text</button>
+        <button class="tabbtn" data-tab="tabRaw" role="tab">Raw JSON</button>
+        <button class="tabbtn" data-tab="tabLlm" role="tab">LLM JSON</button>
+        <button class="tabbtn" data-tab="tabImages" role="tab">Images</button>
+      </div>
 
-    <div class="panel">
-      <h3>Raw JSON</h3>
-      <pre id="rawJson"></pre>
-    </div>
+      <div id="tabText" class="tabpane">
+        <h2>Extracted Text (formatted)</h2>
+        <pre id="extractedText" class="pre"></pre>
+      </div>
+
+      <div id="tabRaw" class="tabpane hidden">
+        <h2>Raw JSON</h2>
+        <pre id="rawJson" class="pre"></pre>
+      </div>
+
+      <div id="tabLlm" class="tabpane hidden">
+        <h2>LLM JSON (placeholder)</h2>
+        <pre id="llmJson" class="pre"></pre>
+      </div>
+
+      <div id="tabImages" class="tabpane hidden">
+        <h2>Images (All selected files)</h2>
+        <div class="sub2">Note: Image previews are shown for image files (jpg/png/webp). For PDFs, preview is not shown in this lightweight UI.</div>
+        <div id="imagesGrid" class="thumbgrid"></div>
+      </div>
+    </section>
   </div>
 
-  <script src="app.js"></script>
+  <script src="/app.js"></script>
 </body>
 </html>

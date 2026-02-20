@@ -24,17 +24,32 @@ function downloadJson(filename, obj){
   a.remove();
 }
 
-function getExtractedText(result){
-  // Project standard: raw extracted OCR text is result.text
-  return (result && typeof result.text === "string") ? result.text : "";
+let batchResults = []; // each: { filename, formatted_text, raw_json, llm_json }
+let lastSelectedFiles = []; // File[] from input at run-time
+let filePreviewUrls = new Map(); // filename -> objectURL (images only)
+
+function isImageFile(file){
+  const t = (file && file.type) ? file.type.toLowerCase() : "";
+  if (t.startsWith("image/")) return true;
+  const name = (file && file.name) ? file.name.toLowerCase() : "";
+  return name.endsWith(".png") || name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".webp");
 }
 
-function getStructured(result){
-  // Project standard: structured JSON is result.structured
-  return (result && result.structured) ? result.structured : null;
+function revokePreviewUrls(){
+  for (const url of filePreviewUrls.values()){
+    try { URL.revokeObjectURL(url); } catch {}
+  }
+  filePreviewUrls.clear();
 }
 
-let batchResults = []; // each item: { filename, ...run_ocr_result }
+function buildPreviewUrls(files){
+  revokePreviewUrls();
+  for (const f of files){
+    if (isImageFile(f)){
+      filePreviewUrls.set(f.name, URL.createObjectURL(f));
+    }
+  }
+}
 
 function populatePicker(){
   const picker = $("resultPicker");
@@ -58,39 +73,85 @@ function populatePicker(){
   picker.value = "0";
 }
 
+function renderImagesAll(){
+  const grid = $("imagesGrid");
+  if (!grid) return;
+  grid.innerHTML = "";
+
+  const files = lastSelectedFiles || [];
+  if (!files.length){
+    const div = document.createElement("div");
+    div.className = "muted";
+    div.textContent = "No files selected.";
+    grid.appendChild(div);
+    return;
+  }
+
+  for (const f of files){
+    const card = document.createElement("div");
+    card.className = "thumb";
+
+    const title = document.createElement("div");
+    title.className = "thumbTitle";
+    title.textContent = f.name;
+    card.appendChild(title);
+
+    if (isImageFile(f)){
+      const img = document.createElement("img");
+      img.className = "thumbImg";
+      img.src = filePreviewUrls.get(f.name) || "";
+      img.alt = f.name;
+      card.appendChild(img);
+    } else {
+      const p = document.createElement("div");
+      p.className = "muted";
+      p.textContent = "Preview not available for this file type (e.g., PDF).";
+      card.appendChild(p);
+    }
+
+    grid.appendChild(card);
+  }
+}
+
 function renderSelected(){
   const picker = $("resultPicker");
   const idx = picker && picker.value ? parseInt(picker.value, 10) : 0;
   const r = batchResults[idx] || null;
 
-  const extracted = r ? getExtractedText(r) : "";
-  const structured = r ? getStructured(r) : null;
+  $("extractedText").textContent = r ? (r.formatted_text || "") : "";
+  $("rawJson").textContent = r ? pretty(r.raw_json || {}) : "";
+  $("llmJson").textContent = r ? pretty(r.llm_json || {}) : "";
 
-  $("extractedText").textContent = extracted || "";
-  $("structuredJson").textContent = structured ? pretty(structured) : "";
-  $("rawJson").textContent = r ? pretty(r) : "";
-
-  // wire download buttons for selected
-  const rawBtn = $("downloadCurrentRawBtn");
-  const structBtn = $("downloadCurrentStructuredBtn");
+  const rawBtn = $("downloadRawBtn");
   if (rawBtn){
     rawBtn.onclick = () => {
       if (!r) return;
-      downloadJson((r.filename || "result") + ".raw.json", r);
+      downloadJson((r.filename || "result") + ".raw.json", r.raw_json || {});
     };
   }
-  if (structBtn){
-    structBtn.onclick = () => {
-      if (!r) return;
-      downloadJson((r.filename || "result") + ".structured.json", structured || {});
-    };
-  }
+
+  // Images tab shows ALL selected files always (batch-friendly)
+  renderImagesAll();
+}
+
+function activateTab(tabId){
+  const panes = document.querySelectorAll('.tabpane');
+  panes.forEach(p => p.classList.add('hidden'));
+
+  const btns = document.querySelectorAll('.tabbtn');
+  btns.forEach(b => b.classList.remove('active'));
+
+  const pane = document.getElementById(tabId);
+  if (pane) pane.classList.remove('hidden');
+
+  const btn = document.querySelector(`.tabbtn[data-tab="${tabId}"]`);
+  if (btn) btn.classList.add('active');
 }
 
 async function run(){
   const files = $("file").files;
   if (!files || files.length === 0){
-    setStatus("Select a file first", "warn");
+    setStatus("Select files first", "warn");
     return;
   }
   if (files.length > 10){
@@ -98,10 +159,10 @@ async function run(){
     return;
   }
 
-  const engine = $("engine").value || "auto";
-  const enableOllama = $("enableOllama").checked ? "true" : "false";
+  lastSelectedFiles = Array.from(files);
+  buildPreviewUrls(lastSelectedFiles);
 
-  // Decide endpoint based on number of files
+  const engine = $("engine").value || "auto";
   const isBatch = files.length > 1;
   const endpoint = isBatch ? "/ocr-batch" : "/ocr";
 
@@ -116,10 +177,7 @@ async function run(){
 
   setStatus(isBatch ? `Running batch OCR (${files.length} files)...` : "Running OCR...", "warn");
 
-  const qs = new URLSearchParams({
-    engine,
-    enable_ollama: enableOllama
-  });
+  const qs = new URLSearchParams({ engine });
 
   try {
     const res = await fetch(`${endpoint}?${qs.toString()}`, { method: "POST", body: fd });
@@ -132,21 +190,21 @@ async function run(){
 
     if (isBatch){
       batchResults = Array.isArray(data.results) ? data.results : [];
-      populatePicker();
-      renderSelected();
-      setStatus(`Done. ${batchResults.length} results.`, "ok");
     } else {
-      batchResults = [{ filename: files[0].name, ...data }];
-      populatePicker();
-      renderSelected();
-      setStatus("Done.", "ok");
+      batchResults = [data];
     }
+
+    populatePicker();
+    renderSelected();
+    setStatus(`Done. ${batchResults.length} result(s).`, "ok");
+
+    // After run, default to Extracted Text tab
+    activateTab('tabText');
   } catch (e){
     setStatus("Request failed: " + (e && e.message ? e.message : String(e)), "bad");
   }
 }
 
-// Init handlers
 document.addEventListener("DOMContentLoaded", () => {
   const runBtn = $("runBtn");
   if (runBtn) runBtn.addEventListener("click", run);
@@ -154,9 +212,13 @@ document.addEventListener("DOMContentLoaded", () => {
   const picker = $("resultPicker");
   if (picker) picker.addEventListener("change", renderSelected);
 
-  // initial
+  document.querySelectorAll('.tabbtn').forEach(btn => {
+    btn.addEventListener('click', () => activateTab(btn.getAttribute('data-tab')));
+  });
+
   batchResults = [];
   populatePicker();
   renderSelected();
   setStatus("Idle", "ok");
+  activateTab('tabText');
 });

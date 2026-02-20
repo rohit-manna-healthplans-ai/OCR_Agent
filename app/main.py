@@ -8,15 +8,13 @@ from fastapi import FastAPI, File, UploadFile, Query, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
 
 from ocr.pipeline import run_ocr
-from ocr.docx_export import build_docx_from_result
 
 
 APP_DIR = Path(__file__).resolve().parent.parent
 WEB_DIR = APP_DIR / "web"
-OUT_DIR = APP_DIR / "out"
 
 
-app = FastAPI(title="OCR Agent")
+app = FastAPI(title="OCR Agent (LLM Disabled)")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -39,6 +37,19 @@ def favicon():
     return Response(status_code=204)
 
 
+def _shape_response(filename: str, raw_json: Dict[str, Any]) -> Dict[str, Any]:
+    # formatted extracted text with header/footer/table tags is in structured.cleaned_text_full
+    structured = raw_json.get("structured") or {}
+    formatted_text = structured.get("cleaned_text_full") or ""
+
+    return {
+        "filename": filename,
+        "formatted_text": formatted_text,
+        "raw_json": raw_json,
+        "llm_json": {},  # placeholder (LLM disabled)
+    }
+
+
 @app.post("/ocr")
 async def ocr_endpoint(
     file: UploadFile = File(...),
@@ -48,20 +59,18 @@ async def ocr_endpoint(
     max_pages: int = Query(default=5, ge=1, le=200),
     return_debug: bool = Query(default=True),
     return_layout: bool = Query(default=True),
-    enable_ollama: bool = Query(default=True),
 ):
     suffix = Path(file.filename or "upload").suffix.lower()
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp_path = Path(tmp.name)
-        # Stream to disk in chunks to avoid loading the whole file in memory
         while True:
-            chunk = await file.read(1024 * 1024)  # 1MB
+            chunk = await file.read(1024 * 1024)
             if not chunk:
                 break
             tmp.write(chunk)
 
     try:
-        result = run_ocr(
+        raw = run_ocr(
             input_path=str(tmp_path),
             preset=preset,
             dpi=dpi,
@@ -69,9 +78,8 @@ async def ocr_endpoint(
             return_debug=return_debug,
             engine=engine,
             return_layout=return_layout,
-            enable_ollama=enable_ollama,
         )
-        return JSONResponse(content=result)
+        return JSONResponse(content=_shape_response(file.filename or "upload", raw))
     finally:
         try:
             tmp_path.unlink(missing_ok=True)  # type: ignore[arg-type]
@@ -88,7 +96,6 @@ async def ocr_batch_endpoint(
     max_pages: int = Query(default=5, ge=1, le=200),
     return_debug: bool = Query(default=True),
     return_layout: bool = Query(default=True),
-    enable_ollama: bool = Query(default=True),
 ):
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded.")
@@ -99,16 +106,14 @@ async def ocr_batch_endpoint(
     tmp_paths: List[Path] = []
 
     try:
-        # Save all first
         for f in files:
             suffix = Path(f.filename or "upload").suffix.lower()
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                 tmp.write(await f.read())
                 tmp_paths.append(Path(tmp.name))
 
-        # OCR sequential (stable for PaddleOCR singleton on Windows)
         for tp, f in zip(tmp_paths, files):
-            r = run_ocr(
+            raw = run_ocr(
                 input_path=str(tp),
                 preset=preset,
                 dpi=dpi,
@@ -116,9 +121,8 @@ async def ocr_batch_endpoint(
                 return_debug=return_debug,
                 engine=engine,
                 return_layout=return_layout,
-                enable_ollama=enable_ollama,
             )
-            results.append({"filename": f.filename, **r})
+            results.append(_shape_response(f.filename or "upload", raw))
 
         return JSONResponse(content={"count": len(results), "results": results})
     finally:
@@ -127,40 +131,3 @@ async def ocr_batch_endpoint(
                 p.unlink(missing_ok=True)  # type: ignore[arg-type]
             except Exception:
                 pass
-
-
-@app.post("/ocr-docx")
-async def ocr_docx_endpoint(
-    file: UploadFile = File(...),
-    engine: str = Query(default="auto"),
-    preset: str = Query(default="auto"),
-    dpi: int = Query(default=200, ge=72, le=600),
-    max_pages: int = Query(default=5, ge=1, le=200),
-):
-    suffix = Path(file.filename or "upload").suffix.lower()
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(await file.read())
-        tmp_in = Path(tmp.name)
-
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = OUT_DIR / "ocr_result.docx"
-
-    try:
-        result = run_ocr(
-            input_path=str(tmp_in),
-            preset=preset,
-            dpi=dpi,
-            max_pages=max_pages,
-            return_debug=False,
-            engine=engine,
-            return_layout=False,
-            enable_ollama=False,
-        )
-
-        build_docx_from_result(result, str(out_path), title="OCR Output")
-        return FileResponse(str(out_path), filename="ocr_result.docx")
-    finally:
-        try:
-            tmp_in.unlink(missing_ok=True)  # type: ignore[arg-type]
-        except Exception:
-            pass

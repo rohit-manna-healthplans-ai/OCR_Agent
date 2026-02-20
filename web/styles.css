@@ -198,3 +198,47 @@ button.danger{ border-color: rgba(239,68,68,0.45); }
 .render h2{ font-size: 16px; margin: 14px 0 8px 0; color: rgba(232,238,252,0.92); }
 .render p{ margin: 0 0 8px 0; color: rgba(232,238,252,0.92); }
 .render b{ font-weight: 950; }
+
+
+/* Tabs */
+.tabs{ display:flex; gap:10px; margin-bottom:14px; flex-wrap:wrap; }
+.tabbtn{
+  padding:10px 14px;
+  border-radius:12px;
+  border:1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.92);
+  cursor:pointer;
+}
+.tabbtn.active{
+  background: rgba(255,255,255,0.14);
+  border-color: rgba(255,255,255,0.18);
+}
+.tabpane.hidden{ display:none; }
+
+/* Image grid */
+.thumbgrid{
+  display:grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 14px;
+}
+.thumb{
+  border:1px solid rgba(255,255,255,0.10);
+  border-radius: 16px;
+  padding: 12px;
+  background: rgba(0,0,0,0.18);
+}
+.thumbTitle{
+  font-size: 13px;
+  opacity: 0.9;
+  margin-bottom: 10px;
+  word-break: break-all;
+}
+.thumbImg{
+  width:100%;
+  height:auto;
+  border-radius: 12px;
+  border:1px solid rgba(255,255,255,0.10);
+}
+.muted{ opacity:0.75; font-size: 13px; }
+.sub2{ opacity:0.75; font-size: 13px; margin-bottom: 10px; }

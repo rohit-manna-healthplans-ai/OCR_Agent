@@ -41,17 +41,12 @@ from ocr.layout import analyze_layout  # noqa: E402
 from ocr.engine_router import route_engine, score_words  # noqa: E402
 from ocr.header_footer import detect_header_footer_from_page  # noqa: E402
 
-
-
-from ocr.llm_postprocess import postprocess_with_ollama
 from ocr.text_formatter import build_final_json
-
 
 def poly_to_xyxy(poly: Any) -> List[int]:
     xs = [p[0] for p in poly]
     ys = [p[1] for p in poly]
     return [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
-
 
 def merge_line_bbox(words: List[dict]) -> List[int]:
     return [
@@ -61,15 +56,12 @@ def merge_line_bbox(words: List[dict]) -> List[int]:
         int(max(w["bbox"][3] for w in words)),
     ]
 
-
 def compute_line_conf(words: List[dict]) -> float:
     return float(sum(float(w.get("conf", 0.0)) for w in words) / max(1, len(words))) if words else 0.0
-
 
 def line_text(words: List[dict]) -> str:
     ws = sorted(words, key=lambda w: (w["bbox"][0], w["bbox"][1]))
     return " ".join((w.get("text") or "").strip() for w in ws).strip()
-
 
 def group_into_lines(words: List[dict]) -> List[List[dict]]:
     if not words:
@@ -105,9 +97,7 @@ def group_into_lines(words: List[dict]) -> List[List[dict]]:
         lines.append(sorted(current, key=lambda x: x["bbox"][0]))
     return lines
 
-
 _OCR_INSTANCE: Optional[Any] = None
-
 
 def get_paddle() -> Any:
     global _OCR_INSTANCE
@@ -132,11 +122,9 @@ def get_paddle() -> Any:
     _OCR_INSTANCE = PaddleOCR(**common_kwargs)
     return _OCR_INSTANCE
 
-
 def _read_image(path: str) -> np.ndarray:
     img = Image.open(path).convert("RGB")
     return np.array(img)
-
 
 def _paddle_words_on_image(img_rgb: np.ndarray) -> List[dict]:
     ocr = get_paddle()
@@ -172,7 +160,6 @@ def _paddle_words_on_image(img_rgb: np.ndarray) -> List[dict]:
             words.append({"text": text, "conf": conf, "bbox": bbox})
     return words
 
-
 def _ocr_best_of_presets(img_rgb: np.ndarray, preset: str) -> Tuple[List[dict], str, np.ndarray]:
     presets = ["clean_doc"] if preset == "auto" else [preset]
     candidates = []
@@ -185,7 +172,6 @@ def _ocr_best_of_presets(img_rgb: np.ndarray, preset: str) -> Tuple[List[dict], 
     best = candidates[0]
     return best[2], best[1], best[3]
 
-
 def run_ocr(
     input_path: str,
     preset: str = "auto",
@@ -194,7 +180,6 @@ def run_ocr(
     return_debug: bool = True,
     engine: str = "auto",
     return_layout: bool = True,
-    enable_ollama: bool = True,
 ) -> Dict[str, Any]:
     p = Path(input_path)
     if not p.exists():
@@ -228,21 +213,6 @@ def run_ocr(
                 pg["header_footer"] = {"available": False, "header_text": "", "footer_text": "", "header_lines_idx": [], "footer_lines_idx": []}
             out["text"] = normalize_linebreaks(out.get("text") or "")
             out["analysis"] = analyze_result(out)
-
-
-            # Optional Ollama postprocess (LLM structuring) - does NOT affect raw OCR text
-            if enable_ollama and os.getenv("DISABLE_OLLAMA", "0") not in ("1", "true", "True"):
-                try:
-                    out["ollama"] = postprocess_with_ollama(
-                        out,
-                        model=os.getenv("OLLAMA_MODEL", "phi3"),
-                        base_url=os.getenv("OLLAMA_URL", "http://127.0.0.1:11434"),
-                        timeout_s=int(os.getenv("OLLAMA_TIMEOUT_S", "300")),
-                    )
-                except Exception as _e:
-                    out["ollama"] = {"available": False, "error": str(_e)}
-            else:
-                out["ollama"] = {"available": False, "error": "disabled"}
             out["structured"] = build_final_json(out)
             return out
 
@@ -342,20 +312,5 @@ def run_ocr(
         out["debug"] = debug_info
 
     out["analysis"] = analyze_result(out)
-
-
-    # Optional Ollama postprocess (LLM structuring) - does NOT affect raw OCR text
-    if enable_ollama and os.getenv("DISABLE_OLLAMA", "0") not in ("1", "true", "True"):
-        try:
-            out["ollama"] = postprocess_with_ollama(
-                out,
-                model=os.getenv("OLLAMA_MODEL", "phi3"),
-                base_url=os.getenv("OLLAMA_URL", "http://127.0.0.1:11434"),
-                timeout_s=int(os.getenv("OLLAMA_TIMEOUT_S", "300")),
-            )
-        except Exception as _e:
-            out["ollama"] = {"available": False, "error": str(_e)}
-    else:
-        out["ollama"] = {"available": False, "error": "disabled"}
     out["structured"] = build_final_json(out)
     return out
