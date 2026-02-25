@@ -1,5 +1,5 @@
 fastapi==0.115.0
-uvicorn[standard]==0.30.6
+uvicorn[standard]>=0.30.6
 python-multipart==0.0.9
 pydantic==2.8.2
 pydantic-settings==2.4.0
@@ -17,3 +17,9 @@ paddlepaddle -f https://www.paddlepaddle.org.cn/whl/windows/mkl/avx/stable.html
 gunicorn==22.0.0
 uvicorn-worker==0.4.0
 requests==2.32.3
+
+
+spacy
+symspellpy
+numpy
+setuptools

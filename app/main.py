@@ -9,12 +9,17 @@ from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
 
 from ocr.pipeline import run_ocr
 
+from app.parsers.fast_cpu_parser import FastLocalCPUParser
+
 
 APP_DIR = Path(__file__).resolve().parent.parent
 WEB_DIR = APP_DIR / "web"
 
 
 app = FastAPI(title="OCR Agent (LLM Disabled)")
+
+# Mandatory post-parser (loads once at startup)
+FAST_PARSER = FastLocalCPUParser()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -42,11 +47,18 @@ def _shape_response(filename: str, raw_json: Dict[str, Any]) -> Dict[str, Any]:
     structured = raw_json.get("structured") or {}
     formatted_text = structured.get("cleaned_text_full") or ""
 
+    # Mandatory: parse OCR JSON into your structured string (multi-page)
+    try:
+        parser_text = FAST_PARSER.process_data(raw_json)
+        parser_error = None
+    except Exception as e:
+        parser_text = ""
+        parser_error = f"{type(e).__name__}: {e}"
+
     return {
         "filename": filename,
-        "formatted_text": formatted_text,
+         "formatted_text": parser_text,   # 🔥 yaha change
         "raw_json": raw_json,
-        "llm_json": {},  # placeholder (LLM disabled)
     }
 
 
