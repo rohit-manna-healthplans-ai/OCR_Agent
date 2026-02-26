@@ -20,15 +20,7 @@
       <div class="row">
         <div class="col">
           <label class="lbl">Select files (batch supported, max 10)</label>
-          <input id="file" type="file" multiple />
-        </div>
-        <div class="col">
-          <label class="lbl">Engine</label>
-          <select id="engine">
-            <option value="auto" selected>auto</option>
-            <option value="tesseract">tesseract</option>
-            <option value="paddle">paddle</option>
-          </select>
+          <input id="file" type="file" multiple accept=".pdf,.doc,.docx,.ppt,.pptx,.jpg,.jpeg,.png,.webp,.bmp,.tiff,.tif,.gif" />
         </div>
         <div class="col col-btn">
           <button id="runBtn" class="btn">Run OCR</button>
@@ -45,7 +37,7 @@
         </div>
       </div>
 
-      <div class="hint">Tip: select multiple files and click Run. UI will call <code>/ocr-batch</code> automatically.</div>
+      <div class="hint">Supported: PDF, DOC, DOCX, PPT, PPTX, JPG, PNG, WebP, BMP, TIFF, GIF. Tip: select multiple files and click Run for batch.</div>
     </section>
 
     <section class="card">

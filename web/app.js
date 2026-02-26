@@ -162,7 +162,6 @@ async function run(){
   lastSelectedFiles = Array.from(files);
   buildPreviewUrls(lastSelectedFiles);
 
-  const engine = $("engine").value || "auto";
   const isBatch = files.length > 1;
   const endpoint = isBatch ? "/ocr-batch" : "/ocr";
 
@@ -177,7 +176,7 @@ async function run(){
 
   setStatus(isBatch ? `Running batch OCR (${files.length} files)...` : "Running OCR...", "warn");
 
-  const qs = new URLSearchParams({ engine });
+  const qs = new URLSearchParams();
 
   try {
     const res = await fetch(`${endpoint}?${qs.toString()}`, { method: "POST", body: fd });

@@ -15,6 +15,17 @@ from app.parsers.fast_cpu_parser import FastLocalCPUParser
 APP_DIR = Path(__file__).resolve().parent.parent
 WEB_DIR = APP_DIR / "web"
 
+# Document and image types supported for OCR (lowercase extensions)
+ALLOWED_EXTENSIONS = {
+    ".pdf",
+    ".doc", ".docx",
+    ".ppt", ".pptx",
+    ".jpg", ".jpeg", ".png", ".webp", ".bmp",
+    ".tiff", ".tif",
+    ".gif",
+}
+ALLOWED_EXTENSIONS_STR = ", ".join(sorted(ALLOWED_EXTENSIONS))
+
 
 app = FastAPI(title="OCR Agent (LLM Disabled)")
 
@@ -62,16 +73,25 @@ def _shape_response(filename: str, raw_json: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _check_extension(filename: str) -> None:
+    suffix = Path(filename or "upload").suffix.lower()
+    if suffix not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{suffix}'. Allowed: {ALLOWED_EXTENSIONS_STR}",
+        )
+
+
 @app.post("/ocr")
 async def ocr_endpoint(
     file: UploadFile = File(...),
-    engine: str = Query(default="auto"),
     preset: str = Query(default="auto"),
     dpi: int = Query(default=200, ge=72, le=600),
     max_pages: int = Query(default=5, ge=1, le=200),
     return_debug: bool = Query(default=True),
     return_layout: bool = Query(default=True),
 ):
+    _check_extension(file.filename or "upload")
     suffix = Path(file.filename or "upload").suffix.lower()
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp_path = Path(tmp.name)
@@ -88,7 +108,7 @@ async def ocr_endpoint(
             dpi=dpi,
             max_pages=max_pages,
             return_debug=return_debug,
-            engine=engine,
+            engine="auto",
             return_layout=return_layout,
         )
         return JSONResponse(content=_shape_response(file.filename or "upload", raw))
@@ -102,7 +122,6 @@ async def ocr_endpoint(
 @app.post("/ocr-batch")
 async def ocr_batch_endpoint(
     files: List[UploadFile] = File(...),
-    engine: str = Query(default="auto"),
     preset: str = Query(default="auto"),
     dpi: int = Query(default=200, ge=72, le=600),
     max_pages: int = Query(default=5, ge=1, le=200),
@@ -119,6 +138,8 @@ async def ocr_batch_endpoint(
 
     try:
         for f in files:
+            _check_extension(f.filename or "upload")
+        for f in files:
             suffix = Path(f.filename or "upload").suffix.lower()
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                 tmp.write(await f.read())
@@ -131,7 +152,7 @@ async def ocr_batch_endpoint(
                 dpi=dpi,
                 max_pages=max_pages,
                 return_debug=return_debug,
-                engine=engine,
+                engine="auto",
                 return_layout=return_layout,
             )
             results.append(_shape_response(f.filename or "upload", raw))

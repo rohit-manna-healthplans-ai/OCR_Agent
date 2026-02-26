@@ -28,6 +28,11 @@ from ocr.preprocess import preprocess  # noqa: E402
 from ocr.postprocess import normalize_linebreaks  # noqa: E402
 from ocr.schemas import Word, Line, PageResult, to_dict  # noqa: E402
 from ocr.engine_router import route_engine, score_words  # noqa: E402
+from ocr.office_utils import (  # noqa: E402
+    docx_load,
+    pptx_extract_slides,
+    convert_office_to_pdf,
+)
 
 def poly_to_xyxy(poly: Any) -> List[int]:
     xs = [p[0] for p in poly]
@@ -112,6 +117,21 @@ def _read_image(path: str) -> np.ndarray:
     img = Image.open(path).convert("RGB")
     return np.array(img)
 
+
+def _read_image_pages(path: str, suffix: str, max_pages: int) -> List[np.ndarray]:
+    """Load image(s): single page for most formats, multiple frames for TIFF."""
+    suffix = (suffix or "").lower()
+    if suffix in (".tiff", ".tif"):
+        im = Image.open(path)
+        frames: List[np.ndarray] = []
+        n_frames = getattr(im, "n_frames", 1)
+        n_frames = min(n_frames, max_pages)
+        for i in range(n_frames):
+            im.seek(i)
+            frames.append(np.array(im.convert("RGB")))
+        return frames if frames else [_read_image(path)]
+    return [_read_image(path)]
+
 def _paddle_words_on_image(img_rgb: np.ndarray) -> List[dict]:
     ocr = get_paddle()
     result = ocr.ocr(img_rgb, cls=True)
@@ -158,6 +178,59 @@ def _ocr_best_of_presets(img_rgb: np.ndarray, preset: str) -> Tuple[List[dict], 
     best = candidates[0]
     return best[2], best[1], best[3]
 
+
+def _ocr_one_image(
+    img_rgb: np.ndarray,
+    page_idx: int,
+    preset: str,
+    engine: str,
+    engine_used_first: Optional[str],
+    return_debug: bool,
+) -> Tuple[PageResult, str, str, Optional[dict]]:
+    """Run OCR on one image; return (PageResult, preset_used, engine_used, debug_entry or None)."""
+    paddle_words, used_preset, used_img = _ocr_best_of_presets(img_rgb, preset=preset)
+    engine_req = (engine or "auto").lower().strip()
+    if engine_req == "paddle":
+        engine_used, final_words = "paddleocr(forced)", paddle_words
+    elif engine_req == "tesseract":
+        from ocr.tesseract_engine import run_tesseract
+        engine_used, final_words = "tesseract(forced)", run_tesseract(used_img)
+    else:
+        engine_used, final_words = route_engine(used_img, paddle_words, printed_engine="tesseract")
+    if page_idx == 0:
+        engine_used_first = engine_used
+    h, w = used_img.shape[:2]
+    line_groups = group_into_lines(final_words)
+    lines: List[Line] = []
+    page_text_lines: List[str] = []
+    for grp in line_groups:
+        txt = line_text(grp)
+        if not txt:
+            continue
+        bbox = merge_line_bbox(grp)
+        conf = compute_line_conf(grp)
+        lines.append(Line(
+            text=txt,
+            conf=conf,
+            bbox=bbox,
+            words=[Word(text=x["text"], conf=float(x["conf"]), bbox=x["bbox"]) for x in grp],
+        ))
+        page_text_lines.append(txt)
+    page_text = "\n".join(page_text_lines).strip()
+    pr = PageResult(page_index=page_idx, width=w, height=h, text=page_text, lines=lines)
+    debug_entry: Optional[dict] = None
+    if return_debug:
+        debug_entry = {
+            "page_index": page_idx,
+            "preset_used": used_preset,
+            "engine_used": engine_used,
+            "words_count": len(final_words),
+            "lines_count": len(lines),
+            "score": score_words(final_words),
+        }
+    return pr, used_preset, engine_used_first or engine_used, debug_entry
+
+
 def run_ocr(
     input_path: str,
     preset: str = "auto",
@@ -172,95 +245,133 @@ def run_ocr(
         raise FileNotFoundError(f"File not found: {input_path}")
 
     suffix = p.suffix.lower()
+    input_path = str(p)
+    converted_pdf_path: Optional[str] = None
+
+    # DOC/PPT: convert to PDF via LibreOffice, then process as PDF
+    if suffix in (".doc", ".ppt"):
+        pdf_path = convert_office_to_pdf(input_path)
+        if not pdf_path:
+            raise FileNotFoundError(
+                "DOC/PPT conversion failed. Install LibreOffice and ensure 'soffice' is in PATH, "
+                "or upload PDF/DOCX/PPTX instead."
+            )
+        converted_pdf_path = pdf_path
+        input_path = pdf_path
+        p = Path(input_path)
+        suffix = ".pdf"
+
     meta: Dict[str, Any] = {
         "engine": "auto(paddle+tesseract)",
         "lang": "en",
         "preset_requested": preset,
         "dpi": dpi,
         "max_pages": max_pages,
-        "input_type": "pdf" if suffix == ".pdf" else "image",
+        "input_type": (
+            "pdf" if suffix == ".pdf"
+            else "docx" if suffix == ".docx"
+            else "pptx" if suffix == ".pptx"
+            else "image"
+        ),
         "mkldnn_disabled": True,
         "engine_requested": engine,
         "return_layout": bool(return_layout),
     }
 
-    if suffix == ".pdf":
-        digital = extract_text_if_digital(str(p), max_pages=max_pages)
-        if digital is not None:
-            meta["digital_pdf"] = True
-            pages: List[PageResult] = []
-            for i, t in enumerate(digital["pages_text"][:max_pages]):
-                pages.append(PageResult(page_index=i, width=0, height=0, text=(t or ""), lines=[]))
-            out = to_dict(pages, meta)
+    try:
+        if suffix == ".pdf":
+            digital = extract_text_if_digital(str(p), max_pages=max_pages)
+            if digital is not None:
+                meta["digital_pdf"] = True
+                pages: List[PageResult] = []
+                for i, t in enumerate(digital["pages_text"][:max_pages]):
+                    pages.append(PageResult(page_index=i, width=0, height=0, text=(t or ""), lines=[]))
+                out = to_dict(pages, meta)
+                out["text"] = normalize_linebreaks(out.get("text") or "")
+                return out
+
+            meta["digital_pdf"] = False
+            imgs = render_pdf_to_images(str(p), dpi=dpi, max_pages=max_pages)
+        elif suffix == ".docx":
+            full_text, images = docx_load(input_path, max_pages=max_pages)
+            page_results = [PageResult(page_index=0, width=0, height=0, text=full_text or "", lines=[])]
+            debug_info = []
+            engine_used_first: Optional[str] = None
+            last_preset = "auto"
+            for i, img in enumerate(images):
+                pr, used_preset, engine_used_first, de = _ocr_one_image(
+                    img, len(page_results), preset, engine, engine_used_first, return_debug
+                )
+                page_results.append(pr)
+                last_preset = used_preset
+                if return_debug and de:
+                    debug_info.append(de)
+            meta["preset_used"] = last_preset
+            meta["engine_used"] = engine_used_first or ""
+            out = to_dict(page_results, meta)
             out["text"] = normalize_linebreaks(out.get("text") or "")
+            for pg in out.get("pages", []):
+                pg["text"] = normalize_linebreaks(pg.get("text") or "")
+            if return_debug:
+                out["debug"] = debug_info
             return out
-
-        meta["digital_pdf"] = False
-        imgs = render_pdf_to_images(str(p), dpi=dpi, max_pages=max_pages)
-    else:
-        imgs = [_read_image(str(p))]
-
-    page_results: List[PageResult] = []
-    debug_info: List[dict] = []
-
-    engine_used_first: Optional[str] = None
-
-    for page_idx, img_rgb in enumerate(imgs):
-        paddle_words, used_preset, used_img = _ocr_best_of_presets(img_rgb, preset=preset)
-        meta["preset_used"] = used_preset
-
-        engine_req = (engine or "auto").lower().strip()
-        if engine_req == "paddle":
-            engine_used, final_words = "paddleocr(forced)", paddle_words
-        elif engine_req == "tesseract":
-            from ocr.tesseract_engine import run_tesseract  # local import
-            engine_used, final_words = "tesseract(forced)", run_tesseract(used_img)
+        elif suffix == ".pptx":
+            slides = pptx_extract_slides(input_path, max_slides=max_pages)
+            page_results = []
+            debug_info = []
+            engine_used_first = None
+            last_preset = "auto"
+            for slide_idx, (slide_text, slide_images) in enumerate(slides):
+                if slide_images:
+                    pr, used_preset, engine_used_first, de = _ocr_one_image(
+                        slide_images[0], slide_idx, preset, engine, engine_used_first, return_debug
+                    )
+                    combined = (slide_text + "\n" + pr.text).strip() if slide_text else pr.text
+                    page_results.append(PageResult(pr.page_index, pr.width, pr.height, combined, pr.lines))
+                    last_preset = used_preset
+                    if return_debug and de:
+                        debug_info.append(de)
+                else:
+                    page_results.append(PageResult(slide_idx, 0, 0, slide_text or "", []))
+            meta["preset_used"] = last_preset
+            meta["engine_used"] = engine_used_first or ""
+            out = to_dict(page_results, meta)
+            out["text"] = normalize_linebreaks(out.get("text") or "")
+            for pg in out.get("pages", []):
+                pg["text"] = normalize_linebreaks(pg.get("text") or "")
+            if return_debug:
+                out["debug"] = debug_info
+            return out
         else:
-            engine_used, final_words = route_engine(used_img, paddle_words, printed_engine="tesseract")
+            imgs = _read_image_pages(str(p), suffix, max_pages)
 
-        if page_idx == 0:
-            engine_used_first = engine_used
-        meta["engine_used"] = engine_used_first or engine_used
+        page_results = []
+        debug_info = []
+        engine_used_first = None
 
-        h, w = used_img.shape[:2]
-        line_groups = group_into_lines(final_words)
+        for page_idx, img_rgb in enumerate(imgs):
+            pr, used_preset, engine_used_first, de = _ocr_one_image(
+                img_rgb, page_idx, preset, engine, engine_used_first, return_debug
+            )
+            page_results.append(pr)
+            meta["preset_used"] = used_preset
+            if return_debug and de:
+                debug_info.append(de)
+        meta["engine_used"] = engine_used_first or ""
 
-        lines: List[Line] = []
-        page_text_lines: List[str] = []
-        for grp in line_groups:
-            txt = line_text(grp)
-            if not txt:
-                continue
-            bbox = merge_line_bbox(grp)
-            conf = compute_line_conf(grp)
-            lines.append(Line(
-                text=txt,
-                conf=conf,
-                bbox=bbox,
-                words=[Word(text=x["text"], conf=float(x["conf"]), bbox=x["bbox"]) for x in grp],
-            ))
-            page_text_lines.append(txt)
+        out = to_dict(page_results, meta)
 
-        page_text = "\n".join(page_text_lines).strip()
-        page_results.append(PageResult(page_index=page_idx, width=w, height=h, text=page_text, lines=lines))
+        out["text"] = normalize_linebreaks(out.get("text") or "")
+        for pg in out.get("pages", []):
+            pg["text"] = normalize_linebreaks(pg.get("text") or "")
 
         if return_debug:
-            debug_info.append({
-                "page_index": page_idx,
-                "preset_used": used_preset,
-                "engine_used": engine_used,
-                "words_count": len(final_words),
-                "lines_count": len(lines),
-                "score": score_words(final_words),
-            })
+            out["debug"] = debug_info
 
-    out = to_dict(page_results, meta)
-
-    out["text"] = normalize_linebreaks(out.get("text") or "")
-    for pg in out.get("pages", []):
-        pg["text"] = normalize_linebreaks(pg.get("text") or "")
-
-    if return_debug:
-        out["debug"] = debug_info
-
-    return out
+        return out
+    finally:
+        if converted_pdf_path:
+            try:
+                Path(converted_pdf_path).unlink(missing_ok=True)
+            except Exception:
+                pass
