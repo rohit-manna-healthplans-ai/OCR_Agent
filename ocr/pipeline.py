@@ -113,6 +113,27 @@ def get_paddle() -> Any:
     _OCR_INSTANCE = PaddleOCR(**common_kwargs)
     return _OCR_INSTANCE
 
+# Max dimension for OCR (larger images are downscaled for speed)
+MAX_OCR_DIM = 1600
+
+
+def _downscale_if_large(img_rgb: np.ndarray, max_dim: int = MAX_OCR_DIM) -> np.ndarray:
+    """Downscale image if either side exceeds max_dim to speed up OCR."""
+    h, w = img_rgb.shape[:2]
+    if max(h, w) <= max_dim:
+        return img_rgb
+    scale = max_dim / max(h, w)
+    new_w, new_h = int(w * scale), int(h * scale)
+    if new_w < 1 or new_h < 1:
+        return img_rgb
+    try:
+        resample = Image.Resampling.LANCZOS
+    except AttributeError:
+        resample = Image.LANCZOS
+    out = np.array(Image.fromarray(img_rgb).resize((new_w, new_h), resample))
+    return out
+
+
 def _read_image(path: str) -> np.ndarray:
     img = Image.open(path).convert("RGB")
     return np.array(img)
@@ -167,6 +188,7 @@ def _paddle_words_on_image(img_rgb: np.ndarray) -> List[dict]:
     return words
 
 def _ocr_best_of_presets(img_rgb: np.ndarray, preset: str) -> Tuple[List[dict], str, np.ndarray]:
+    img_rgb = _downscale_if_large(img_rgb)
     presets = ["clean_doc"] if preset == "auto" else [preset]
     candidates = []
     for pr in presets:

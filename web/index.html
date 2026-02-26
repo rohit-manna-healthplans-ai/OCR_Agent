@@ -1,74 +1,54 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>OCR Agent</title>
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
   <div class="wrap">
     <header class="top">
-      <div>
-        <h1>OCR Agent</h1>
-        <div class="sub">LLM disabled • Views: Extracted Text, Raw JSON, LLM JSON (placeholder), Images</div>
-      </div>
+      <h1>OCR Agent</h1>
       <div id="status" class="status">Idle</div>
     </header>
 
     <section class="card">
-      <div class="row">
-        <div class="col">
-          <label class="lbl">Select files (batch supported, max 10)</label>
-          <input id="file" type="file" multiple accept=".pdf,.doc,.docx,.ppt,.pptx,.jpg,.jpeg,.png,.webp,.bmp,.tiff,.tif,.gif" />
-        </div>
-        <div class="col col-btn">
-          <button id="runBtn" class="btn">Run OCR</button>
-        </div>
-      </div>
-
-      <div class="row">
-        <div class="col">
-          <label class="lbl">Selected result</label>
-          <select id="resultPicker"></select>
-        </div>
-        <div class="col col-btn">
-          <button id="downloadRawBtn" class="btn secondary">Download raw_json</button>
+      <label class="lbl">Select files (max 10)</label>
+      <div class="row row--file">
+        <input id="fileInput" type="file" multiple accept=".pdf,.doc,.docx,.ppt,.pptx,.jpg,.jpeg,.png,.webp,.bmp,.tiff,.tif,.gif" />
+        <button id="runOcrBtn" type="button" class="btn" onclick="runOcr()">Run OCR</button>
+        <div id="timerBox" class="timer-box" aria-label="OCR elapsed time">
+          <span class="timer-box__label">Total time</span>
+          <span id="timerValue" class="timer-box__value">—</span>
         </div>
       </div>
-
-      <div class="hint">Supported: PDF, DOC, DOCX, PPT, PPTX, JPG, PNG, WebP, BMP, TIFF, GIF. Tip: select multiple files and click Run for batch.</div>
     </section>
 
     <section class="card">
-      <div class="tabs" role="tablist" aria-label="Views">
-        <button class="tabbtn active" data-tab="tabText" role="tab">Extracted Text</button>
-        <button class="tabbtn" data-tab="tabRaw" role="tab">Raw JSON</button>
+      <div id="resultRow" class="row hidden">
+        <label class="lbl">Result</label>
+        <select id="resultSelect" onchange="selectResult()"></select>
       </div>
-
-      <div id="tabText" class="tabpane">
-        <h2>Extracted Text (formatted)</h2>
+      <div class="tabs">
+        <button type="button" class="tabbtn active" onclick="showTab('text')">Extracted Text</button>
+        <button type="button" class="tabbtn" onclick="showTab('raw')">Raw JSON</button>
+      </div>
+      <div id="paneText" class="tabpane">
         <pre id="extractedText" class="pre"></pre>
       </div>
-
-      <div id="tabRaw" class="tabpane hidden">
-        <h2>Raw JSON</h2>
+      <div id="paneRaw" class="tabpane hidden">
         <pre id="rawJson" class="pre"></pre>
-      </div>
-
-      <div id="tabLlm" class="tabpane hidden">
-        <h2>LLM JSON (placeholder)</h2>
-        <pre id="llmJson" class="pre"></pre>
-      </div>
-
-      <div id="tabImages" class="tabpane hidden">
-        <h2>Images (All selected files)</h2>
-        <div class="sub2">Note: Image previews are shown for image files (jpg/png/webp). For PDFs, preview is not shown in this lightweight UI.</div>
-        <div id="imagesGrid" class="thumbgrid"></div>
       </div>
     </section>
   </div>
 
-  <script src="/app.js"></script>
+  <!-- Cache-bust so browser loads latest app.js (avoids old cached script with renderSelected) -->
+  <script>
+    window.runOcr = window.runOcr || function () { document.getElementById("status").textContent = "Loading..."; };
+    window.showTab = window.showTab || function () {};
+    window.selectResult = window.selectResult || function () {};
+  </script>
+  <script src="/app.js?v=4"></script>
 </body>
 </html>

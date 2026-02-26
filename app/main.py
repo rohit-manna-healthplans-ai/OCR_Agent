@@ -86,7 +86,7 @@ def _check_extension(filename: str) -> None:
 async def ocr_endpoint(
     file: UploadFile = File(...),
     preset: str = Query(default="auto"),
-    dpi: int = Query(default=200, ge=72, le=600),
+    dpi: int = Query(default=150, ge=72, le=600),
     max_pages: int = Query(default=5, ge=1, le=200),
     return_debug: bool = Query(default=True),
     return_layout: bool = Query(default=True),
@@ -123,7 +123,7 @@ async def ocr_endpoint(
 async def ocr_batch_endpoint(
     files: List[UploadFile] = File(...),
     preset: str = Query(default="auto"),
-    dpi: int = Query(default=200, ge=72, le=600),
+    dpi: int = Query(default=150, ge=72, le=600),
     max_pages: int = Query(default=5, ge=1, le=200),
     return_debug: bool = Query(default=True),
     return_layout: bool = Query(default=True),

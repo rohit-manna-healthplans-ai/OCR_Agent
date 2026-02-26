@@ -1,223 +1,158 @@
-function $(id){ return document.getElementById(id); }
+(function () {
+  "use strict";
 
-function pretty(obj){
-  try { return JSON.stringify(obj, null, 2); } catch { return String(obj); }
-}
+  var results = [];
+  var currentIndex = 0;
 
-function setStatus(text, kind){
-  const el = $("status");
-  if (!el) return;
-  el.textContent = text || "Idle";
-  el.style.background = "rgba(255,255,255,0.06)";
-  if (kind === "ok") el.style.background = "rgba(16,185,129,0.14)";
-  if (kind === "warn") el.style.background = "rgba(245,158,11,0.14)";
-  if (kind === "bad") el.style.background = "rgba(239,68,68,0.14)";
-}
-
-function downloadJson(filename, obj){
-  const blob = new Blob([pretty(obj)], {type:"application/json;charset=utf-8"});
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-}
-
-let batchResults = []; // each: { filename, formatted_text, raw_json, llm_json }
-let lastSelectedFiles = []; // File[] from input at run-time
-let filePreviewUrls = new Map(); // filename -> objectURL (images only)
-
-function isImageFile(file){
-  const t = (file && file.type) ? file.type.toLowerCase() : "";
-  if (t.startsWith("image/")) return true;
-  const name = (file && file.name) ? file.name.toLowerCase() : "";
-  return name.endsWith(".png") || name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".webp");
-}
-
-function revokePreviewUrls(){
-  for (const url of filePreviewUrls.values()){
-    try { URL.revokeObjectURL(url); } catch {}
-  }
-  filePreviewUrls.clear();
-}
-
-function buildPreviewUrls(files){
-  revokePreviewUrls();
-  for (const f of files){
-    if (isImageFile(f)){
-      filePreviewUrls.set(f.name, URL.createObjectURL(f));
-    }
-  }
-}
-
-function populatePicker(){
-  const picker = $("resultPicker");
-  if (!picker) return;
-  picker.innerHTML = "";
-  if (!batchResults.length){
-    const opt = document.createElement("option");
-    opt.value = "";
-    opt.textContent = "(no results)";
-    picker.appendChild(opt);
-    picker.disabled = true;
-    return;
-  }
-  picker.disabled = false;
-  batchResults.forEach((r, idx) => {
-    const opt = document.createElement("option");
-    opt.value = String(idx);
-    opt.textContent = r.filename || `file_${idx+1}`;
-    picker.appendChild(opt);
-  });
-  picker.value = "0";
-}
-
-function renderImagesAll(){
-  const grid = $("imagesGrid");
-  if (!grid) return;
-  grid.innerHTML = "";
-
-  const files = lastSelectedFiles || [];
-  if (!files.length){
-    const div = document.createElement("div");
-    div.className = "muted";
-    div.textContent = "No files selected.";
-    grid.appendChild(div);
-    return;
+  function el(id) {
+    return document.getElementById(id);
   }
 
-  for (const f of files){
-    const card = document.createElement("div");
-    card.className = "thumb";
-
-    const title = document.createElement("div");
-    title.className = "thumbTitle";
-    title.textContent = f.name;
-    card.appendChild(title);
-
-    if (isImageFile(f)){
-      const img = document.createElement("img");
-      img.className = "thumbImg";
-      img.src = filePreviewUrls.get(f.name) || "";
-      img.alt = f.name;
-      card.appendChild(img);
-    } else {
-      const p = document.createElement("div");
-      p.className = "muted";
-      p.textContent = "Preview not available for this file type (e.g., PDF).";
-      card.appendChild(p);
-    }
-
-    grid.appendChild(card);
-  }
-}
-
-function renderSelected(){
-  const picker = $("resultPicker");
-  const idx = picker && picker.value ? parseInt(picker.value, 10) : 0;
-  const r = batchResults[idx] || null;
-
-  $("extractedText").textContent = r ? (r.formatted_text || "") : "";
-  $("rawJson").textContent = r ? pretty(r.raw_json || {}) : "";
-  $("llmJson").textContent = r ? pretty(r.llm_json || {}) : "";
-
-  const rawBtn = $("downloadRawBtn");
-  if (rawBtn){
-    rawBtn.onclick = () => {
-      if (!r) return;
-      downloadJson((r.filename || "result") + ".raw.json", r.raw_json || {});
-    };
+  function setStatus(msg, type) {
+    var s = document.getElementById("status");
+    if (!s) return;
+    s.textContent = msg || "Idle";
+    s.style.background = "rgba(255,255,255,0.06)";
+    if (type === "ok") s.style.background = "rgba(16,185,129,0.14)";
+    if (type === "warn") s.style.background = "rgba(245,158,11,0.14)";
+    if (type === "bad") s.style.background = "rgba(239,68,68,0.14)";
   }
 
-  // Images tab shows ALL selected files always (batch-friendly)
-  renderImagesAll();
-}
-
-function activateTab(tabId){
-  const panes = document.querySelectorAll('.tabpane');
-  panes.forEach(p => p.classList.add('hidden'));
-
-  const btns = document.querySelectorAll('.tabbtn');
-  btns.forEach(b => b.classList.remove('active'));
-
-  const pane = document.getElementById(tabId);
-  if (pane) pane.classList.remove('hidden');
-
-  const btn = document.querySelector(`.tabbtn[data-tab="${tabId}"]`);
-  if (btn) btn.classList.add('active');
-}
-
-async function run(){
-  const files = $("file").files;
-  if (!files || files.length === 0){
-    setStatus("Select files first", "warn");
-    return;
-  }
-  if (files.length > 10){
-    setStatus("Batch limit is 10 files. Please select max 10.", "warn");
-    return;
+  function showTab(name) {
+    var textPane = document.getElementById("paneText");
+    var rawPane = document.getElementById("paneRaw");
+    var btns = document.querySelectorAll(".tabbtn");
+    if (textPane) textPane.classList.toggle("hidden", name !== "text");
+    if (rawPane) rawPane.classList.toggle("hidden", name !== "raw");
+    if (btns[0]) btns[0].classList.toggle("active", name === "text");
+    if (btns[1]) btns[1].classList.toggle("active", name === "raw");
   }
 
-  lastSelectedFiles = Array.from(files);
-  buildPreviewUrls(lastSelectedFiles);
-
-  const isBatch = files.length > 1;
-  const endpoint = isBatch ? "/ocr-batch" : "/ocr";
-
-  const fd = new FormData();
-  if (isBatch){
-    for (const f of files){
-      fd.append("files", f);
-    }
-  } else {
-    fd.append("file", files[0]);
+  function renderResult() {
+    var r = results[currentIndex] || null;
+    var textEl = document.getElementById("extractedText");
+    var rawEl = document.getElementById("rawJson");
+    if (textEl) textEl.textContent = r ? (r.formatted_text || "") : "";
+    if (rawEl) rawEl.textContent = r ? JSON.stringify(r.raw_json || {}, null, 2) : "";
   }
 
-  setStatus(isBatch ? `Running batch OCR (${files.length} files)...` : "Running OCR...", "warn");
-
-  const qs = new URLSearchParams();
-
-  try {
-    const res = await fetch(`${endpoint}?${qs.toString()}`, { method: "POST", body: fd });
-    const data = await res.json();
-
-    if (!res.ok){
-      setStatus("Error: " + (data && data.detail ? data.detail : res.statusText), "bad");
+  function updateResultSelect() {
+    var row = document.getElementById("resultRow");
+    var sel = document.getElementById("resultSelect");
+    if (!row || !sel) return;
+    if (results.length <= 1) {
+      row.classList.add("hidden");
       return;
     }
+    row.classList.remove("hidden");
+    sel.innerHTML = "";
+    results.forEach(function (r, i) {
+      var opt = document.createElement("option");
+      opt.value = i;
+      opt.textContent = r.filename || "File " + (i + 1);
+      sel.appendChild(opt);
+    });
+    sel.value = "0";
+    currentIndex = 0;
+  }
 
-    if (isBatch){
-      batchResults = Array.isArray(data.results) ? data.results : [];
+  var timerInterval = null;
+
+  function formatElapsed(ms) {
+    return (ms / 1000).toFixed(1) + "s";
+  }
+
+  function setTimerBox(value, state) {
+    var box = document.getElementById("timerBox");
+    var val = document.getElementById("timerValue");
+    if (val) val.textContent = value;
+    if (box) {
+      box.classList.remove("running", "error");
+      if (state === "running") box.classList.add("running");
+      if (state === "error") box.classList.add("error");
+    }
+  }
+
+  // Expose on window first so onclick="runOcr()" works before DOMContentLoaded
+  window.runOcr = function () {
+    var input = document.getElementById("fileInput");
+    if (!input || !input.files || input.files.length === 0) {
+      setStatus("Select files first", "warn");
+      return;
+    }
+    if (input.files.length > 10) {
+      setStatus("Max 10 files", "warn");
+      return;
+    }
+    var isBatch = input.files.length > 1;
+    var endpoint = isBatch ? "/ocr-batch" : "/ocr";
+    var fd = new FormData();
+    var i;
+    if (isBatch) {
+      for (i = 0; i < input.files.length; i++) {
+        fd.append("files", input.files[i]);
+      }
     } else {
-      batchResults = [data];
+      fd.append("file", input.files[0]);
     }
 
-    populatePicker();
-    renderSelected();
-    setStatus(`Done. ${batchResults.length} result(s).`, "ok");
+    var startTime = Date.now();
+    setTimerBox("0.0s", "running");
+    if (timerInterval) clearInterval(timerInterval);
+    timerInterval = setInterval(function () {
+      var s = document.getElementById("status");
+      if (s) s.textContent = "Running OCR... " + formatElapsed(Date.now() - startTime);
+      setTimerBox(formatElapsed(Date.now() - startTime), "running");
+    }, 500);
+    setStatus("Running OCR...", "warn");
+    showTab("text");
 
-    // After run, default to Extracted Text tab
-    activateTab('tabText');
-  } catch (e){
-    setStatus("Request failed: " + (e && e.message ? e.message : String(e)), "bad");
-  }
-}
+    fetch(endpoint, { method: "POST", body: fd })
+      .then(function (res) {
+        return res.json().then(function (data) {
+          return { ok: res.ok, status: res.status, data: data };
+        }).catch(function () {
+          return { ok: false, status: res.status, data: {} };
+        });
+      })
+      .then(function (out) {
+        if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+        var elapsed = Date.now() - startTime;
+        var elapsedStr = formatElapsed(elapsed);
+        if (!out.ok) {
+          setTimerBox(elapsedStr, "error");
+          setStatus("Error: " + (out.data.detail || out.status), "bad");
+          return;
+        }
+        setTimerBox(elapsedStr, "done");
+        results = isBatch && Array.isArray(out.data.results) ? out.data.results : [out.data];
+        currentIndex = 0;
+        updateResultSelect();
+        renderResult();
+        setStatus("Done. " + results.length + " result(s).", "ok");
+      })
+      .catch(function (err) {
+        if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+        var elapsed = Date.now() - startTime;
+        setTimerBox(formatElapsed(elapsed), "error");
+        setStatus("Request failed: " + (err && err.message ? err.message : String(err)), "bad");
+      });
+  };
 
-document.addEventListener("DOMContentLoaded", () => {
-  const runBtn = $("runBtn");
-  if (runBtn) runBtn.addEventListener("click", run);
+  window.showTab = showTab;
+  window.selectResult = function () {
+    var sel = document.getElementById("resultSelect");
+    if (sel) currentIndex = parseInt(sel.value, 10) || 0;
+    renderResult();
+  };
 
-  const picker = $("resultPicker");
-  if (picker) picker.addEventListener("change", renderSelected);
-
-  document.querySelectorAll('.tabbtn').forEach(btn => {
-    btn.addEventListener('click', () => activateTab(btn.getAttribute('data-tab')));
+  document.addEventListener("DOMContentLoaded", function () {
+    try {
+      setTimerBox("—", "idle");
+      renderResult();
+      setStatus("Idle", "ok");
+    } catch (e) {
+      console.error(e);
+    }
   });
-
-  batchResults = [];
-  populatePicker();
-  renderSelected();
-  setStatus("Idle", "ok");
-  activateTab('tabText');
-});
+})();
