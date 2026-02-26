@@ -1,16 +1,10 @@
 from __future__ import annotations
 
 """
-Fast + stable pipeline (Windows/Python 3.11):
+Fast pipeline for raw JSON output (pages/lines/words). Parser handles layout.
 
-- PaddleOCR pass for recall (word boxes)
-- Routing policy updated per requirement:
-    * Handwritten => PaddleOCR
-    * Printed => Tesseract (fallback to Paddle if Tesseract is extremely weak)
-- preset=auto uses only clean_doc (fast)
-- tables: multi-table detection (no OpenCV)
-- header/footer: detected from OCR line bboxes (no extra OCR pass)
-- analysis always returned
+- PaddleOCR for word boxes; engine routing: handwritten => Paddle, printed => Tesseract
+- preset=auto uses clean_doc only. No tables/header_footer/layout/fields/analysis.
 """
 
 import os
@@ -31,17 +25,9 @@ if TYPE_CHECKING:
 
 from ocr.pdf_utils import extract_text_if_digital, render_pdf_to_images  # noqa: E402
 from ocr.preprocess import preprocess  # noqa: E402
-from ocr.postprocess import normalize_linebreaks, validate_fields  # noqa: E402
+from ocr.postprocess import normalize_linebreaks  # noqa: E402
 from ocr.schemas import Word, Line, PageResult, to_dict  # noqa: E402
-from ocr.table_detect import detect_tables_from_page  # noqa: E402
-from ocr.tesseract_engine import run_tesseract_single_char  # noqa: E402
-from ocr.field_extract import extract_fields_from_page  # noqa: E402
-from ocr.analyze import analyze_result  # noqa: E402
-from ocr.layout import analyze_layout  # noqa: E402
 from ocr.engine_router import route_engine, score_words  # noqa: E402
-from ocr.header_footer import detect_header_footer_from_page  # noqa: E402
-
-from ocr.text_formatter import build_final_json
 
 def poly_to_xyxy(poly: Any) -> List[int]:
     xs = [p[0] for p in poly]
@@ -206,14 +192,7 @@ def run_ocr(
             for i, t in enumerate(digital["pages_text"][:max_pages]):
                 pages.append(PageResult(page_index=i, width=0, height=0, text=(t or ""), lines=[]))
             out = to_dict(pages, meta)
-            out["fields"] = {}
-            for pg in out.get("pages", []):
-                pg["tables"] = []
-                pg["layout"] = {"available": False, "blocks": []}
-                pg["header_footer"] = {"available": False, "header_text": "", "footer_text": "", "header_lines_idx": [], "footer_lines_idx": []}
             out["text"] = normalize_linebreaks(out.get("text") or "")
-            out["analysis"] = analyze_result(out)
-            out["structured"] = build_final_json(out)
             return out
 
         meta["digital_pdf"] = False
@@ -224,14 +203,11 @@ def run_ocr(
     page_results: List[PageResult] = []
     debug_info: List[dict] = []
 
-    first_page_img: Optional[np.ndarray] = None
     engine_used_first: Optional[str] = None
 
     for page_idx, img_rgb in enumerate(imgs):
         paddle_words, used_preset, used_img = _ocr_best_of_presets(img_rgb, preset=preset)
         meta["preset_used"] = used_preset
-        if page_idx == 0:
-            first_page_img = used_img
 
         engine_req = (engine or "auto").lower().strip()
         if engine_req == "paddle":
@@ -284,33 +260,7 @@ def run_ocr(
     for pg in out.get("pages", []):
         pg["text"] = normalize_linebreaks(pg.get("text") or "")
 
-    for pg in out.get("pages", []):
-        pg["tables"] = detect_tables_from_page(pg)
-
-    for pg in out.get("pages", []):
-        pg["header_footer"] = detect_header_footer_from_page(pg)
-
-    if return_layout:
-        for i, pg in enumerate(out.get("pages", [])):
-            if i == 0 and first_page_img is not None:
-                pg["layout"] = analyze_layout(first_page_img)
-            else:
-                pg["layout"] = {"available": False, "blocks": []}
-    else:
-        for pg in out.get("pages", []):
-            pg["layout"] = {"available": False, "blocks": []}
-
-    if out.get("pages") and first_page_img is not None:
-        def _char_fn(crop_rgb: np.ndarray) -> Dict[str, Any]:
-            return run_tesseract_single_char(crop_rgb, whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
-        out["fields"] = extract_fields_from_page(out["pages"][0], first_page_img, recognize_char_fn=_char_fn)
-        out["fields"] = validate_fields(out.get("fields") or {})
-    else:
-        out["fields"] = {}
-
     if return_debug:
         out["debug"] = debug_info
 
-    out["analysis"] = analyze_result(out)
-    out["structured"] = build_final_json(out)
     return out
