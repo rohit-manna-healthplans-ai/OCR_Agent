@@ -24,7 +24,7 @@ RUN pip install -r /app/requirements.txt
 
 COPY . /app
 
-# Render / Azure set $PORT at runtime; gunicorn_conf.py reads it
+# Azure App Service sets $PORT
 ENV PORT=8000
 EXPOSE 8000
 
