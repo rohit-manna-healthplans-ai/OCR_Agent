@@ -1,3 +1,7 @@
+# Windows local development: same as requirements.txt but PaddlePaddle from official Windows wheel.
+# Use: pip install -r requirements-windows.txt
+# (Render/Docker use requirements.txt with Linux paddle from PyPI.)
+
 fastapi==0.115.0
 uvicorn[standard]>=0.30.6
 python-multipart==0.0.9
@@ -14,12 +18,10 @@ python-docx>=1.0.0
 python-pptx>=0.6.0
 
 paddleocr==2.8.1
-# For Linux (Render, Docker): use PyPI. For Windows dev: pip install paddlepaddle from Paddle URL.
-paddlepaddle>=2.5.0,<3.0.0
+paddlepaddle -f https://www.paddlepaddle.org.cn/whl/windows/mkl/avx/stable.html
 gunicorn==22.0.0
 uvicorn-worker==0.4.0
 requests==2.32.3
-
 
 spacy
 symspellpy

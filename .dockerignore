@@ -1,21 +1,16 @@
-__pycache__/
+# Git and IDE
+.git
+.gitignore
+.cursor
+.vscode
+*.md
+__pycache__
 *.pyc
 *.pyo
-*.pyd
-.Python
+.pytest_cache
 .env
-.venv/
-venv/
-build/
-dist/
-*.egg-info/
-.pytest_cache/
-.mypy_cache/
-.vscode/
-.idea/
-.DS_Store
-*.log
-
-# OCR cache/models
-.paddleocr/
-**/.paddleocr/
+.venv
+venv
+*.egg-info
+dist
+build

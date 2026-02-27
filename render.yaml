@@ -1,0 +1,7 @@
+# Render Blueprint: deploy OCR Agent as a Web Service
+# See https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: ocr-agent
+    runtime: docker
+    # Dockerfile at repo root; Render sets PORT automatically
