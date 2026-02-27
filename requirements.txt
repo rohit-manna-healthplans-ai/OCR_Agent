@@ -15,8 +15,8 @@ python-docx>=1.0.0
 python-pptx>=0.6.0
 
 paddleocr==2.8.1
-# For Linux (Render, Docker): use PyPI. For Windows dev: pip install paddlepaddle from Paddle URL.
-paddlepaddle>=2.5.0,<3.0.0
+# Windows: PaddlePaddle from official wheel
+paddlepaddle -f https://www.paddlepaddle.org.cn/whl/windows/mkl/avx/stable.html
 gunicorn==22.0.0
 uvicorn-worker==0.4.0
 requests==2.32.3
