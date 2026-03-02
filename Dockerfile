@@ -21,7 +21,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 # Use requirements-docker.txt for Linux (HF Spaces); requirements.txt is for Windows
 COPY requirements-docker.txt /app/requirements-docker.txt
-RUN pip install -r /app/requirements-docker.txt
+RUN pip install -r /app/requirements-docker.txt \
+    && python -m spacy download en_core_web_sm
 
 COPY . /app
 
