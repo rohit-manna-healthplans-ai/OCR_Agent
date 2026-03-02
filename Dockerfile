@@ -19,13 +19,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY requirements.txt /app/requirements.txt
-RUN pip install -r /app/requirements.txt
+# Use requirements-docker.txt for Linux (HF Spaces); requirements.txt is for Windows
+COPY requirements-docker.txt /app/requirements-docker.txt
+RUN pip install -r /app/requirements-docker.txt
 
 COPY . /app
 
-# Azure App Service sets $PORT
-ENV PORT=8000
-EXPOSE 8000
+# Hugging Face Spaces use port 7860; gunicorn_conf reads PORT
+ENV PORT=7860
+EXPOSE 7860
 
 CMD ["gunicorn", "-c", "gunicorn_conf.py", "app.main:app"]
