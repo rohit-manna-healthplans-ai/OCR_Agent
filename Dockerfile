@@ -1,4 +1,3 @@
-# Azure-ready container for FastAPI OCR
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -11,23 +10,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     FLAGS_enable_mkldnn=0 \
     FLAGS_use_dnnl=0
 
-# System deps: tesseract + OpenCV runtime libs
+# OpenCV runtime libs only - no tesseract
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    tesseract-ocr \
     libglib2.0-0 \
     libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-# Use requirements-docker.txt for Linux (HF Spaces); requirements.txt is for Windows
 COPY requirements-docker.txt /app/requirements-docker.txt
 RUN pip install -r /app/requirements-docker.txt \
     && python -m spacy download en_core_web_sm
 
 COPY . /app
 
-# Hugging Face Spaces use port 7860; gunicorn_conf reads PORT
-ENV PORT=7860
-EXPOSE 7860
+ENV PORT=8000
+EXPOSE 8000
 
 CMD ["gunicorn", "-c", "gunicorn_conf.py", "app.main:app"]

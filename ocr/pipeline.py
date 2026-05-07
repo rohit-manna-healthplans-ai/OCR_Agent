@@ -3,8 +3,8 @@ from __future__ import annotations
 """
 Fast pipeline for raw JSON output (pages/lines/words). Parser handles layout.
 
-- PaddleOCR for word boxes; engine routing: handwritten => Paddle, printed => Tesseract
-- preset=auto uses clean_doc only. No tables/header_footer/layout/fields/analysis.
+- PaddleOCR for word boxes
+- preset=auto uses multi-pass preprocessing. No tables/header_footer/layout/fields/analysis.
 """
 
 import os
@@ -27,7 +27,8 @@ from ocr.pdf_utils import extract_text_if_digital, render_pdf_to_images  # noqa:
 from ocr.preprocess import preprocess  # noqa: E402
 from ocr.postprocess import normalize_linebreaks  # noqa: E402
 from ocr.schemas import Word, Line, PageResult, to_dict  # noqa: E402
-from ocr.engine_router import route_engine, score_words  # noqa: E402
+from ocr.engine_router import score_words, select_best_paddle_result  # noqa: E402
+from ocr.layout import analyse_layout  # noqa: E402
 from ocr.office_utils import (  # noqa: E402
     docx_load,
     pptx_extract_slides,
@@ -90,6 +91,7 @@ def group_into_lines(words: List[dict]) -> List[List[dict]]:
 
 _OCR_INSTANCE: Optional[Any] = None
 
+
 def get_paddle() -> Any:
     global _OCR_INSTANCE
     if _OCR_INSTANCE is not None:
@@ -97,24 +99,37 @@ def get_paddle() -> Any:
 
     from paddleocr import PaddleOCR  # lazy import
 
-    common_kwargs = dict(use_angle_cls=True, lang="en", show_log=False)
+    # use_angle_cls=True handles rotated/upside-down text
+    # det_db_score_mode='slow' is more accurate than 'fast' (default)
+    # det_db_thresh / det_db_box_thresh: lower thresholds catch more text regions
+    # rec_batch_num=6: process more text regions in parallel
+    common_kwargs = dict(
+        use_angle_cls=True,
+        lang="en",
+        show_log=False,
+        det_db_score_mode="slow",
+        det_db_thresh=0.3,
+        det_db_box_thresh=0.5,
+        det_db_unclip_ratio=1.8,
+        rec_batch_num=6,
+    )
 
-    try:
-        _OCR_INSTANCE = PaddleOCR(**common_kwargs, use_mkldnn=False)
-        return _OCR_INSTANCE
-    except TypeError:
-        pass
-    try:
-        _OCR_INSTANCE = PaddleOCR(**common_kwargs, enable_mkldnn=False)
-        return _OCR_INSTANCE
-    except TypeError:
-        pass
+    for extra in [
+        {"use_mkldnn": False},
+        {"enable_mkldnn": False},
+        {},
+    ]:
+        try:
+            _OCR_INSTANCE = PaddleOCR(**common_kwargs, **extra)
+            return _OCR_INSTANCE
+        except TypeError:
+            continue
 
-    _OCR_INSTANCE = PaddleOCR(**common_kwargs)
+    _OCR_INSTANCE = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
     return _OCR_INSTANCE
 
 # Max dimension for OCR (larger images are downscaled for speed)
-MAX_OCR_DIM = 1600
+MAX_OCR_DIM = 2400  # Larger dim = more detail for PaddleOCR detection
 
 
 def _downscale_if_large(img_rgb: np.ndarray, max_dim: int = MAX_OCR_DIM) -> np.ndarray:
@@ -188,17 +203,27 @@ def _paddle_words_on_image(img_rgb: np.ndarray) -> List[dict]:
     return words
 
 def _ocr_best_of_presets(img_rgb: np.ndarray, preset: str) -> Tuple[List[dict], str, np.ndarray]:
+    """
+    Run PaddleOCR on multiple preprocessed versions of the image and return
+    the result with the highest score. Falls back to single preset if not "auto".
+    """
+    from ocr.preprocess import get_all_presets_for_auto
+
     img_rgb = _downscale_if_large(img_rgb)
-    presets = ["clean_doc"] if preset == "auto" else [preset]
+
+    if preset == "auto":
+        preset_images = get_all_presets_for_auto(img_rgb)
+    else:
+        processed, used = preprocess(img_rgb, preset=preset)
+        preset_images = [(used, processed)]
+
     candidates = []
-    for pr in presets:
-        proc, used = preprocess(img_rgb, preset=pr)
-        words = _paddle_words_on_image(proc)
-        score = score_words(words)
-        candidates.append((score, used, words, proc))
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    best = candidates[0]
-    return best[2], best[1], best[3]
+    for preset_name, proc_img in preset_images:
+        words = _paddle_words_on_image(proc_img)
+        candidates.append((words, preset_name, proc_img))
+
+    best_words, best_preset, best_img = select_best_paddle_result(candidates)
+    return best_words, best_preset, best_img
 
 
 def _ocr_one_image(
@@ -209,47 +234,61 @@ def _ocr_one_image(
     engine_used_first: Optional[str],
     return_debug: bool,
 ) -> Tuple[PageResult, str, str, Optional[dict]]:
-    """Run OCR on one image; return (PageResult, preset_used, engine_used, debug_entry or None)."""
+    """Run OCR on one image; return (PageResult, preset_used, engine_used, debug)."""
+
     paddle_words, used_preset, used_img = _ocr_best_of_presets(img_rgb, preset=preset)
-    engine_req = (engine or "auto").lower().strip()
-    if engine_req == "paddle":
-        engine_used, final_words = "paddleocr(forced)", paddle_words
-    elif engine_req == "tesseract":
-        from ocr.tesseract_engine import run_tesseract
-        engine_used, final_words = "tesseract(forced)", run_tesseract(used_img)
-    else:
-        engine_used, final_words = route_engine(used_img, paddle_words, printed_engine="tesseract")
+    _ = engine  # retained for API compatibility
+    engine_used = "paddleocr"
     if page_idx == 0:
         engine_used_first = engine_used
+
     h, w = used_img.shape[:2]
-    line_groups = group_into_lines(final_words)
-    lines: List[Line] = []
-    page_text_lines: List[str] = []
-    for grp in line_groups:
-        txt = line_text(grp)
-        if not txt:
+
+    # -- Layout analysis ---------------------------------------------------
+    blocks, columns, tables = analyse_layout(paddle_words, page_width=w, page_height=h)
+
+    # -- Build flat Line list (backward compat) from layout blocks --------
+    all_lines: List[Line] = []
+    page_text_parts: List[str] = []
+
+    for block in blocks:
+        if block.block_type == "noise":
             continue
-        bbox = merge_line_bbox(grp)
-        conf = compute_line_conf(grp)
-        lines.append(Line(
-            text=txt,
-            conf=conf,
-            bbox=bbox,
-            words=[Word(text=x["text"], conf=float(x["conf"]), bbox=x["bbox"]) for x in grp],
-        ))
-        page_text_lines.append(txt)
-    page_text = "\n".join(page_text_lines).strip()
-    pr = PageResult(page_index=page_idx, width=w, height=h, text=page_text, lines=lines)
+        for ln in block.lines:
+            if ln.text.strip():
+                all_lines.append(ln)
+                page_text_parts.append(ln.text)
+
+    page_text = "\n".join(page_text_parts).strip()
+
+    pr = PageResult(
+        page_index=page_idx,
+        width=w,
+        height=h,
+        text=page_text,
+        lines=all_lines,
+        columns=columns,
+        blocks=blocks,
+        tables=tables,
+    )
+
     debug_entry: Optional[dict] = None
     if return_debug:
         debug_entry = {
             "page_index": page_idx,
             "preset_used": used_preset,
             "engine_used": engine_used,
-            "words_count": len(final_words),
-            "lines_count": len(lines),
-            "score": score_words(final_words),
+            "words_count": len(paddle_words),
+            "lines_count": len(all_lines),
+            "blocks_count": len(blocks),
+            "columns_count": len(columns),
+            "tables_count": len(tables),
+            "block_types": {
+                bt: sum(1 for b in blocks if b.block_type == bt)
+                for bt in set(b.block_type for b in blocks)
+            },
         }
+
     return pr, used_preset, engine_used_first or engine_used, debug_entry
 
 
@@ -284,7 +323,7 @@ def run_ocr(
         suffix = ".pdf"
 
     meta: Dict[str, Any] = {
-        "engine": "auto(paddle+tesseract)",
+        "engine": "paddleocr",
         "lang": "en",
         "preset_requested": preset,
         "dpi": dpi,

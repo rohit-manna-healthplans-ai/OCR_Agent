@@ -1,12 +1,36 @@
+from __future__ import annotations
+
+"""
+FastLocalCPUParser - converts structured OCR output (blocks + layout) into
+clean, human-readable formatted text.
+
+Output format per page:
+    <PAGE N>
+    <HEADER>
+      ... header lines ...
+    <BODY>
+      ... body content with layout-aware formatting ...
+    <SIDEBAR>
+      ... sidebar content ...
+    <FOOTER>
+      ... footer lines ...
+
+    Tables are rendered as markdown tables.
+    Label-value pairs are formatted as aligned key: value lines.
+    Multi-column layouts are rendered column by column with a divider.
+"""
+
 import re
 import statistics
-import numpy as np
+from typing import List, Dict, Any, Optional
+
 import pkg_resources
 import spacy
 from symspellpy import SymSpell, Verbosity
 
 
 class FastLocalCPUParser:
+
     def __init__(self):
         self.sym_spell = SymSpell(max_dictionary_edit_distance=2, prefix_length=7)
         dictionary_path = pkg_resources.resource_filename(
@@ -15,142 +39,393 @@ class FastLocalCPUParser:
         self.sym_spell.load_dictionary(dictionary_path, term_index=0, count_index=1)
         self.nlp = spacy.load("en_core_web_sm")
 
-    def smart_cpu_text_fix(self, text):
-        if not text:
-            return ""
+    # -- Text correction ---------------------------------------------------
 
-        t = re.sub(r'([a-zA-Z])([0-9])', r'\1 \2', text)
-        t = re.sub(r'([0-9])([a-zA-Z])', r'\1 \2', t)
+    def fix_text(self, text: str) -> str:
+        """
+        Conservative spell-correction using SymSpell + spaCy NER.
+        Skips: named entities, proper nouns, numbers, IDs (mixed-case /
+        contains digits), short tokens (<=2 chars), non-alpha tokens.
+        """
+        if not text or len(text.strip()) < 2:
+            return text
+
+        # Protect numeric adjacency
+        t = re.sub(r"([a-zA-Z])([0-9])", r"\1 \2", text)
+        t = re.sub(r"([0-9])([a-zA-Z])", r"\1 \2", t)
 
         doc = self.nlp(t)
-        final_words = []
-
+        out = []
         for token in doc:
-            clean_w = token.text
-            if token.ent_type_ or token.pos_ in ['PROPN', 'NUM'] or not clean_w.islower() or not clean_w.isalpha():
-                final_words.append(token.text_with_ws)
+            word = token.text
+            # Skip correction for special tokens
+            if (
+                token.ent_type_
+                or token.pos_ in ("PROPN", "NUM", "SYM", "PUNCT", "X")
+                or not word.isalpha()
+                or not word.islower()
+                or len(word) <= 2
+                or any(c.isdigit() for c in word)
+            ):
+                out.append(token.text_with_ws)
                 continue
 
-            if len(clean_w) > 3:
-                suggestions = self.sym_spell.lookup(clean_w, Verbosity.CLOSEST, max_edit_distance=2)
-                if suggestions:
-                    final_words.append(suggestions[0].term + token.whitespace_)
+            if len(word) > 3:
+                suggestions = self.sym_spell.lookup(
+                    word, Verbosity.CLOSEST, max_edit_distance=2
+                )
+                if suggestions and suggestions[0].term != word:
+                    out.append(suggestions[0].term + token.whitespace_)
                 else:
-                    final_words.append(token.text_with_ws)
+                    out.append(token.text_with_ws)
             else:
-                final_words.append(token.text_with_ws)
+                out.append(token.text_with_ws)
 
-        res = "".join(final_words).strip()
-        return res.replace("Firewall", "View all").replace("Viewall", "View all")
+        return "".join(out).strip()
 
-    def calculate_geometry(self, words, W, H):
-        if not words:
-            return 15, -1
+    # -- Block renderers ---------------------------------------------------
 
-        heights = [(w['bbox'][3] - w['bbox'][1]) for w in words]
-        median_h = statistics.median(heights) if heights else 15
-        sidebar_x = -1
+    def _render_heading(self, block: Dict[str, Any]) -> List[str]:
+        lines = block.get("lines", [])
+        out = []
+        for ln in lines:
+            text = self.fix_text(ln.get("text", "").strip())
+            if text:
+                out.append(f"## {text}")
+        return out
 
-        if W > H * 1.1:
-            middle_words = [w for w in words if (H * 0.15) < ((w['bbox'][1] + w['bbox'][3]) / 2) < (H * 0.85)]
-            if middle_words:
-                x_profile = np.zeros(int(W))
-                for w in middle_words:
-                    x_profile[int(w['bbox'][0]):int(w['bbox'][2])] = 1
+    def _render_paragraph(self, block: Dict[str, Any]) -> List[str]:
+        lines = block.get("lines", [])
+        out = []
+        for ln in lines:
+            text = self.fix_text(ln.get("text", "").strip())
+            if text:
+                out.append(text)
+        return out
 
-                start, end = int(W * 0.10), int(W * 0.25)
-                zeros = np.where(x_profile[start:end] == 0)[0]
+    def _render_label_value(self, block: Dict[str, Any], page_width: int) -> List[str]:
+        """
+        Render label-value lines with consistent alignment.
+        Detects the colon separator and aligns values.
+        Handles multi-value lines (multiple label: value pairs on one line).
+        """
+        lines = block.get("lines", [])
+        out = []
+        for ln in lines:
+            text = ln.get("text", "").strip()
+            words = ln.get("words", [])
+            if not text:
+                continue
 
-                if len(zeros) > 0:
-                    gaps = np.split(zeros, np.where(np.diff(zeros) != 1)[0] + 1)
-                    widest = max(gaps, key=len)
-                    if len(widest) > (W * 0.02):
-                        calculated_boundary = start + widest[0] + (len(widest) / 2)
-                        sidebar_x = min(calculated_boundary, W * 0.22)
+            # If we have word-level bboxes, use gaps to detect multi-column pairs
+            if words and page_width > 0:
+                # Split at large horizontal gaps into separate label:value segments
+                segments = []
+                current_seg = [words[0]]
+                gap_threshold = page_width * 0.06
 
-        return median_h, sidebar_x
+                for i in range(1, len(words)):
+                    gap = words[i]["bbox"][0] - words[i - 1]["bbox"][2]
+                    if gap > gap_threshold:
+                        segments.append(current_seg)
+                        current_seg = [words[i]]
+                    else:
+                        current_seg.append(words[i])
+                segments.append(current_seg)
 
-    def process_data(self, data: dict) -> str:
-        output_lines = []
+                seg_texts = []
+                for seg in segments:
+                    seg_text = " ".join(
+                        (w.get("text") or "").strip() for w in seg
+                    ).strip()
+                    if seg_text:
+                        seg_texts.append(self.fix_text(seg_text))
+
+                if len(seg_texts) > 1:
+                    out.append("  |  ".join(seg_texts))
+                elif seg_texts:
+                    out.append(seg_texts[0])
+            else:
+                out.append(self.fix_text(text))
+
+        return out
+
+    def _render_table(self, block: Dict[str, Any]) -> List[str]:
+        """Render a table block as a markdown table."""
+        # Use pre-reconstructed table if available in block metadata
+        table_text = block.get("text", "")
+        if "|" in table_text:
+            return table_text.split("\n")
+        # Fallback: render lines as pipe-separated
+        lines = block.get("lines", [])
+        if not lines:
+            return []
+        rows = []
+        for ln in lines:
+            words = ln.get("words", [])
+            if words:
+                cells = [self.fix_text((w.get("text") or "").strip()) for w in words]
+                rows.append("| " + " | ".join(cells) + " |")
+            elif ln.get("text"):
+                rows.append(ln["text"])
+        return rows
+
+    def _render_list_item(self, block: Dict[str, Any]) -> List[str]:
+        lines = block.get("lines", [])
+        out = []
+        for ln in lines:
+            text = self.fix_text(ln.get("text", "").strip())
+            if text:
+                out.append(f"• {text}")
+        return out
+
+    def _render_block(self, block: Dict[str, Any], page_width: int) -> List[str]:
+        btype = block.get("block_type", "paragraph")
+        if btype == "heading":
+            return self._render_heading(block)
+        if btype in ("table_row", "table"):
+            # table blocks are rendered separately via _render_tables()
+            # individual table_row remnants should not appear here
+            return []
+        if btype == "label_value":
+            return self._render_label_value(block, page_width)
+        if btype == "list_item":
+            return self._render_list_item(block)
+        if btype == "noise":
+            return []
+        # paragraph, caption, and anything else
+        return self._render_paragraph(block)
+
+    # -- Zone assembly -----------------------------------------------------
+
+    def _blocks_for_zone(
+        self, blocks: List[Dict], zone: str
+    ) -> List[Dict]:
+        return [b for b in blocks if b.get("block_type") == zone]
+
+    def _body_blocks(self, blocks: List[Dict]) -> List[Dict]:
+        body_types = {
+            "paragraph", "heading", "table_row", "table",
+            "label_value", "list_item", "caption"
+        }
+        return [b for b in blocks if b.get("block_type") in body_types]
+
+    def _render_zone(
+        self,
+        zone_blocks: List[Dict],
+        page_width: int,
+        zone_tag: str,
+        indent: str = "  ",
+    ) -> List[str]:
+        if not zone_blocks:
+            return []
+        out = [f"<{zone_tag}>"]
+        for block in sorted(zone_blocks, key=lambda b: b.get("reading_order", 0)):
+            rendered = self._render_block(block, page_width)
+            for line in rendered:
+                if line.strip():
+                    out.append(f"{indent}{line}")
+        return out
+
+    # -- Column layout rendering -------------------------------------------
+
+    def _render_columns(
+        self,
+        columns: List[Dict],
+        page_width: int,
+    ) -> List[str]:
+        """
+        Render multi-column body content.
+        For single-column pages: render blocks in reading order directly.
+        For multi-column pages: render each column separately with a divider.
+        """
+        if not columns:
+            return []
+
+        if len(columns) == 1:
+            col = columns[0]
+            out = []
+            for block in sorted(
+                col.get("blocks", []), key=lambda b: b.get("reading_order", 0)
+            ):
+                rendered = self._render_block(block, page_width)
+                for line in rendered:
+                    if line.strip():
+                        out.append(f"  {line}")
+            return out
+
+        # Multi-column: render side by side with dividers
+        out = []
+        for ci, col in enumerate(columns):
+            if ci > 0:
+                out.append("  " + "─" * 40)
+            col_blocks = sorted(
+                col.get("blocks", []), key=lambda b: b.get("reading_order", 0)
+            )
+            for block in col_blocks:
+                rendered = self._render_block(block, page_width)
+                for line in rendered:
+                    if line.strip():
+                        out.append(f"  {line}")
+        return out
+
+    # -- Standalone table rendering ----------------------------------------
+
+    def _render_tables(self, tables: List[Dict]) -> List[str]:
+        if not tables:
+            return []
+        out = []
+        for t in tables:
+            out.append("")
+            out.append("  <TABLE>")
+            for row in t.get("text", "").split("\n"):
+                if row.strip():
+                    out.append(f"  {row}")
+            out.append("  </TABLE>")
+        return out
+
+    # -- Main entry --------------------------------------------------------
+
+    def process_data(self, data: Dict[str, Any]) -> str:
+        """
+        Convert OCR JSON output to structured formatted text.
+
+        Uses layout blocks (if present) for intelligent rendering.
+        Falls back to flat text for simple/legacy responses.
+        """
+        output_lines: List[str] = []
         pages = data.get("pages", [])
 
         if not pages:
+            # Fallback: no pages, render flat text
             text = data.get("text", "")
             output_lines.append("<BODY>")
             for line in text.split("\n"):
-                if line.strip():
-                    output_lines.append(f"  {self.smart_cpu_text_fix(line)}")
+                fixed = self.fix_text(line.strip())
+                if fixed:
+                    output_lines.append(f"  {fixed}")
             return "\n".join(output_lines)
 
         for idx, page in enumerate(pages):
-            output_lines.append(f"\n<PAGE {idx+1}>")
+            output_lines.append(f"\n<PAGE {idx + 1}>")
 
-            lines = page.get("lines", [])
             W = page.get("width", 1920) or 1920
             H = page.get("height", 1080) or 1080
+            _ = H
+            blocks: List[Dict] = page.get("blocks", [])
+            columns: List[Dict] = page.get("columns", [])
+            tables: List[Dict] = page.get("tables", [])
 
-            all_words = []
-            for line in lines:
-                words = line.get("words", []) or [{'text': line['text'], 'bbox': line['bbox']}]
-                for w in words:
-                    cleaned = self.smart_cpu_text_fix(w['text'])
-                    if cleaned:
-                        all_words.append({'text': cleaned, 'bbox': w['bbox']})
+            # -- If no layout blocks, fall back to word-based layout -------
+            if not blocks:
+                lines_raw = page.get("lines", [])
+                all_words = []
+                for line in lines_raw:
+                    for w in line.get("words", []) or [
+                        {"text": line["text"], "bbox": line["bbox"], "conf": line.get("conf", 0.9)}
+                    ]:
+                        text = self.fix_text((w.get("text") or "").strip())
+                        if text:
+                            all_words.append({"text": text, "bbox": w["bbox"]})
 
-            median_h, sidebar_boundary = self.calculate_geometry(all_words, W, H)
-            zones = {'HEADER': [], 'SIDEBAR': [], 'BODY': [], 'FOOTER': []}
+                if not all_words:
+                    continue
 
-            for w in all_words:
-                y = (w['bbox'][1] + w['bbox'][3]) / 2
-                x = (w['bbox'][0] + w['bbox'][2]) / 2
+                # Simple zone split for fallback
+                header_y = H * 0.12
+                footer_y = H * 0.92
 
-                if y < (H * 0.12):
-                    zones['HEADER'].append(w)
-                elif y > (H * 0.92):
-                    zones['FOOTER'].append(w)
-                elif sidebar_boundary != -1 and x < sidebar_boundary:
-                    zones['SIDEBAR'].append(w)
-                else:
-                    zones['BODY'].append(w)
+                def simple_zone(w):
+                    yc = (w["bbox"][1] + w["bbox"][3]) / 2
+                    if yc < header_y:
+                        return "HEADER"
+                    if yc > footer_y:
+                        return "FOOTER"
+                    return "BODY"
 
-            def build_zone(word_list, is_body=False):
-                if not word_list:
-                    return []
+                zone_words: Dict[str, List] = {
+                    "HEADER": [], "BODY": [], "FOOTER": []
+                }
+                for w in all_words:
+                    zone_words[simple_zone(w)].append(w)
 
-                word_list.sort(key=lambda item: (item['bbox'][1] + item['bbox'][3]) / 2)
-                rows, curr_row = [], [word_list[0]]
+                def build_rows(wlist):
+                    if not wlist:
+                        return []
+                    heights = [max(1, w["bbox"][3] - w["bbox"][1]) for w in wlist]
+                    med = statistics.median(heights)
+                    wlist.sort(key=lambda x: (x["bbox"][1] + x["bbox"][3]) / 2)
+                    rows, cur = [], [wlist[0]]
+                    for i in range(1, len(wlist)):
+                        y1 = (cur[0]["bbox"][1] + cur[0]["bbox"][3]) / 2
+                        y2 = (wlist[i]["bbox"][1] + wlist[i]["bbox"][3]) / 2
+                        if abs(y2 - y1) < med * 0.65:
+                            cur.append(wlist[i])
+                        else:
+                            rows.append(sorted(cur, key=lambda x: x["bbox"][0]))
+                            cur = [wlist[i]]
+                    rows.append(sorted(cur, key=lambda x: x["bbox"][0]))
+                    return rows
 
-                for i in range(1, len(word_list)):
-                    y1 = (curr_row[0]['bbox'][1] + curr_row[0]['bbox'][3]) / 2
-                    y2 = (word_list[i]['bbox'][1] + word_list[i]['bbox'][3]) / 2
+                for zone_tag in ("HEADER", "BODY", "FOOTER"):
+                    rows = build_rows(zone_words[zone_tag])
+                    if not rows:
+                        continue
+                    output_lines.append(f"<{zone_tag}>")
+                    for row in rows:
+                        parts = []
+                        for j, w in enumerate(row):
+                            if j > 0:
+                                gap = row[j]["bbox"][0] - row[j - 1]["bbox"][2]
+                                parts.append("  |  " if gap > W * 0.04 else " ")
+                            parts.append(w["text"])
+                        line_str = "".join(parts).strip()
+                        if line_str:
+                            output_lines.append(f"  {line_str}")
+                continue
 
-                    if abs(y2 - y1) < (median_h * 0.65):
-                        curr_row.append(word_list[i])
-                    else:
-                        rows.append(sorted(curr_row, key=lambda item: item['bbox'][0]))
-                        curr_row = [word_list[i]]
+            # -- Full layout rendering using blocks ------------------------
 
-                rows.append(sorted(curr_row, key=lambda item: item['bbox'][0]))
+            # Render HEADER zone
+            header_blocks = self._blocks_for_zone(blocks, "header")
+            output_lines.extend(self._render_zone(header_blocks, W, "HEADER"))
 
-                out = []
-                for r in rows:
-                    line_str = ""
-                    for j in range(len(r)):
-                        if j > 0:
-                            gap = r[j]['bbox'][0] - r[j-1]['bbox'][2]
-                            if gap > (W * 0.035) and is_body:
-                                line_str += "   |   "
-                            else:
-                                line_str += " "
-                        line_str += r[j]['text']
-                    out.append(line_str.strip())
-                return out
+            # Render SIDEBAR zone
+            sidebar_blocks = self._blocks_for_zone(blocks, "sidebar")
+            output_lines.extend(self._render_zone(sidebar_blocks, W, "SIDEBAR"))
 
-            for zone_name in ["HEADER", "SIDEBAR", "BODY", "FOOTER"]:
-                zone_content = build_zone(zones[zone_name], is_body=(zone_name == "BODY"))
-                if zone_content:
-                    output_lines.append(f"<{zone_name}>")
-                    for line in zone_content:
-                        output_lines.append(f"  {line}")
+            # Render BODY: non-table blocks first, then tables inline
+            body_blocks = self._body_blocks(blocks)
+            has_content = bool(body_blocks) or bool(tables)
+
+            if has_content:
+                output_lines.append("<BODY>")
+
+                # Render non-table body blocks
+                non_table_blocks = [
+                    b for b in body_blocks
+                    if b.get("block_type") not in ("table", "table_row")
+                ]
+                for block in sorted(non_table_blocks, key=lambda b: b.get("reading_order", 0)):
+                    rendered = self._render_block(block, W)
+                    for line in rendered:
+                        if line.strip():
+                            output_lines.append(f"  {line}")
+
+                # Render tables with clear delimiters
+                if tables:
+                    for t in tables:
+                        output_lines.append("")
+                        output_lines.append("  <TABLE>")
+                        table_text = t.get("text", "")
+                        for row_line in table_text.split("\n"):
+                            if row_line.strip():
+                                output_lines.append(f"  {row_line}")
+                        output_lines.append("  </TABLE>")
+                        output_lines.append("")
+
+            # Render FOOTER zone
+            footer_blocks = self._blocks_for_zone(blocks, "footer")
+            output_lines.extend(self._render_zone(footer_blocks, W, "FOOTER"))
 
         return "\n".join(output_lines)

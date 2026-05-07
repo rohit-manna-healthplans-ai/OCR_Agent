@@ -10,10 +10,39 @@ from typing import Dict, Any, Optional
 _WS_RE = re.compile(r"\s+")
 _NON_ASCII_RE = re.compile(r"[^\x00-\x7F]+")
 
-# Common OCR confusions (very conservative)
+# Expanded OCR confusion corrections for PaddleOCR on printed English
 _OCR_FIXES = [
-    (re.compile(r"\b0([A-Za-z])"), r"O\1"),     # 0A -> OA (sometimes)
-    (re.compile(r"\b([A-Za-z])0\b"), r"\1O"),  # A0 -> AO
+    # Zero vs letter O
+    (re.compile(r"\b0([A-Za-z])"), r"O\1"),
+    (re.compile(r"\b([A-Za-z])0\b"), r"\1O"),
+    # l vs 1 (lowercase L confused with 1)
+    (re.compile(r"\b1([a-z]{2,})"), r"l\1"),
+    # rn vs m (very common paddle mistake)
+    (re.compile(r"\brn\b"), "m"),
+    (re.compile(r"rn([aeiou])"), r"m\1"),
+    # ii vs u (double lowercase-i vs u)
+    (re.compile(r"\bii([a-z])"), r"u\1"),
+    # Stray pipe characters from table borders
+    (re.compile(r"(?<!\s)\|(?!\s)"), " "),
+    # Auth/Referral misspelling (f->t OCR confusion)
+    (re.compile(r'\bAuth/Reterral\b'), 'Auth/Referral'),
+    # Service code line-split recovery: "P-\n99203" or "P- 99203" -> "P-99203"
+    (re.compile(r'\b(P|Q|G|H|S|T|V)-\s+(\d{4,5})\b'), r'\1-\2'),
+    # Leading O1/O2 in outcome codes -> 01/02 (uppercase O misread as zero context)
+    (re.compile(r'\bO(\d)\s+(DISCHARGED|EXPIRED|TRANSFERRED|HOSPICE|LEFT)\b'),
+     r'0\1 \2'),
+    # Diagnosis code space insertion: "J0 6.9" -> "J06.9", "C1 5.9" -> "C15.9"
+    (re.compile(r'\b([A-Z])(\d)\s(\d+\.\d+)\b'), r'\1\2\3'),
+    # "Totals:" followed by amounts - ensure space after colon
+    (re.compile(r'\bTotals:(\S)'), r'Totals: \1'),
+    # EDI Claim/Batch ID spacing
+    (re.compile(r'\bEDIClaim#'), 'EDI Claim # '),
+    (re.compile(r'\bEDIBatchID:'), 'EDI Batch ID: '),
+]
+
+_PADDLE_SPACE_FIXES = [
+    # Fix missing space before capital in middle of word: "helloWorld" -> "hello World"
+    (re.compile(r"([a-z])([A-Z][a-z])"), r"\1 \2"),
 ]
 
 
@@ -27,13 +56,26 @@ def clean_text(text: str) -> str:
     return t.strip()
 
 
+def fix_common_paddle_errors(text: str) -> str:
+    """Apply PaddleOCR-specific post-correction heuristics."""
+    if not text:
+        return ""
+    t = text
+    for pat, repl in _OCR_FIXES:
+        t = pat.sub(repl, t)
+    for pat, repl in _PADDLE_SPACE_FIXES:
+        t = pat.sub(repl, t)
+    return t
+
+
 def normalize_linebreaks(text: str) -> str:
-    """Keep paragraphs but normalize excessive blank lines."""
+    """Keep paragraphs but normalize excessive blank lines, then apply paddle fixes."""
     if not text:
         return ""
     t = text.replace("\r\n", "\n").replace("\r", "\n")
     t = "\n".join(line.rstrip() for line in t.split("\n"))
     t = re.sub(r"\n{3,}", "\n\n", t)
+    t = fix_common_paddle_errors(t)
     return t.strip()
 
 
