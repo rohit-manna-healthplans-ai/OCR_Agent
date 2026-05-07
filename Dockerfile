@@ -18,8 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY requirements-docker.txt /app/requirements-docker.txt
-RUN pip install -r /app/requirements-docker.txt \
-    && python -m spacy download en_core_web_sm
+RUN pip install -r /app/requirements-docker.txt
 
 COPY . /app
 

@@ -79,6 +79,18 @@ def _upscale_rgb(img_rgb: np.ndarray, scale: float) -> np.ndarray:
     return cv2.resize(img_rgb, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
 
 
+def _remove_grid_lines(gray: np.ndarray) -> np.ndarray:
+    """Remove horizontal/vertical ruling lines from printed forms."""
+    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(gray.shape[1] // 30, 40), 1))
+    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(gray.shape[0] // 30, 40)))
+    h_lines = cv2.morphologyEx(gray, cv2.MORPH_OPEN, h_kernel)
+    v_lines = cv2.morphologyEx(gray, cv2.MORPH_OPEN, v_kernel)
+    grid = cv2.add(h_lines, v_lines)
+    cleaned = cv2.subtract(gray, grid)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    return cv2.dilate(cleaned, kernel, iterations=1)
+
+
 def preprocess(img_rgb: np.ndarray, preset: str = "auto") -> Tuple[np.ndarray, str]:
     """
     Returns preprocessed RGB image and the preset name used.
@@ -93,7 +105,8 @@ def preprocess(img_rgb: np.ndarray, preset: str = "auto") -> Tuple[np.ndarray, s
       scan_enhance -> strong CLAHE + adaptive threshold + morphological cleanup
     """
     preset = (preset or "auto").lower().strip()
-    valid = {"auto", "clean_doc", "printed_hq", "photo", "low_light", "scan_enhance"}
+    valid = {"auto", "clean_doc", "printed_hq", "photo", "low_light", "scan_enhance",
+             "form_grid", "screenshot"}
     if preset not in valid:
         preset = "auto"
 
@@ -164,6 +177,24 @@ def preprocess(img_rgb: np.ndarray, preset: str = "auto") -> Tuple[np.ndarray, s
             out = _upscale_rgb(out, 1.6)
         return out, used
 
+    # --- form_grid: printed forms with handwritten grid cells ---
+    if used == "form_grid":
+        h, w = img_rgb.shape[:2]
+        scale = max(1.0, 2400 / max(h, w))
+        out = _upscale_rgb(img_rgb, scale)
+        out = _bilateral_denoise(out)
+        g = _to_gray(out)
+        g = _remove_grid_lines(g)
+        g = _clahe(g)
+        return _to_rgb(g), used
+
+    # --- screenshot: pixel-perfect UI captures ---
+    if used == "screenshot":
+        h, w = img_rgb.shape[:2]
+        if max(h, w) < 1600:
+            return _upscale_rgb(img_rgb, 1600 / max(h, w)), used
+        return img_rgb, used
+
     # --- low_light ---
     g = _clahe(_denoise(gray), strong=True)
     b = _adaptive_thresh(g)
@@ -175,25 +206,32 @@ def preprocess(img_rgb: np.ndarray, preset: str = "auto") -> Tuple[np.ndarray, s
     return out, used
 
 
+def _has_grid_structure(img_rgb: np.ndarray) -> bool:
+    gray = _to_gray(img_rgb)
+    edges = cv2.Canny(gray, 50, 150)
+    h_k = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 1))
+    v_k = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 30))
+    h = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, h_k)
+    v = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, v_k)
+    total = max(1, int(edges.sum()))
+    return (int(h.sum()) + int(v.sum())) / total > 0.35
+
+
 def get_all_presets_for_auto(img_rgb: np.ndarray):
-    """
-    For multi-pass OCR: return preprocessed images under each candidate preset.
-    Used in pipeline.py to run PaddleOCR on multiple preprocessed versions
-    and pick the best result.
-    Returns list of (preset_name, processed_img_rgb) tuples.
-    """
     gray = _to_gray(img_rgb)
     mean = float(gray.mean())
     std = float(gray.std())
 
-    candidates = ["printed_hq", "clean_doc"]
-
-    if mean < 80:
+    if _has_grid_structure(img_rgb):
+        candidates = ["form_grid", "printed_hq"]
+    elif mean < 80:
         candidates = ["low_light", "scan_enhance", "printed_hq"]
     elif mean < 130 and std < 45:
         candidates = ["scan_enhance", "clean_doc", "printed_hq"]
     elif std > 75:
         candidates = ["photo", "printed_hq"]
+    else:
+        candidates = ["printed_hq", "clean_doc"]
 
     results = []
     for p in candidates:

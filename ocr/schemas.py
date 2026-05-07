@@ -34,7 +34,7 @@ class Block:
         header      - page header region
         footer      - page footer region
         sidebar     - narrow left/right column
-        noise       - low-confidence or icon-only line (excluded from text output)
+        noise       - low-confidence / icon-like line (still emitted in outputs)
     """
     block_type: str
     lines: List[Line]

@@ -90,6 +90,40 @@ def group_into_lines(words: List[dict]) -> List[List[dict]]:
     return lines
 
 _OCR_INSTANCE: Optional[Any] = None
+_PP_STRUCTURE_INSTANCE: Optional[Any] = None
+
+
+def get_pp_structure() -> Any:
+    """
+    Lazy-load PP-Structure (ML-based layout + table detector).
+    Already included in paddleocr==2.8.1 - no extra install needed.
+    table=True enables the table recognition model.
+    layout=False skips figure/title detection (we handle that in layout.py).
+    """
+    global _PP_STRUCTURE_INSTANCE
+    if _PP_STRUCTURE_INSTANCE is not None:
+        return _PP_STRUCTURE_INSTANCE
+
+    from paddleocr import PPStructure
+
+    for kwargs in [
+        {"use_mkldnn": False},
+        {"enable_mkldnn": False},
+        {},
+    ]:
+        try:
+            _PP_STRUCTURE_INSTANCE = PPStructure(
+                table=True,
+                ocr=True,
+                show_log=False,
+                **kwargs,
+            )
+            return _PP_STRUCTURE_INSTANCE
+        except TypeError:
+            continue
+
+    _PP_STRUCTURE_INSTANCE = PPStructure(table=True, ocr=True, show_log=False)
+    return _PP_STRUCTURE_INSTANCE
 
 
 def get_paddle() -> Any:
@@ -202,6 +236,125 @@ def _paddle_words_on_image(img_rgb: np.ndarray) -> List[dict]:
             words.append({"text": text, "conf": conf, "bbox": bbox})
     return words
 
+
+def _run_pp_structure_tables(img_rgb: np.ndarray) -> List[Dict[str, Any]]:
+    """
+    Run PP-Structure on an image and return extracted tables.
+
+    PP-Structure detects table regions using an ML model, then runs
+    table structure recognition to produce HTML output with proper
+    row/column structure including merged cells.
+
+    Returns list of table dicts compatible with our existing schema:
+    {
+        "bbox": [x1, y1, x2, y2],
+        "headers": ["col1", "col2", ...],
+        "rows": [["cell", "cell"], ...],
+        "text": "markdown table string",
+        "html": "<table>...</table>",   # bonus: raw HTML for consumers
+        "source": "pp_structure"
+    }
+    Returns [] if PP-Structure finds no tables or fails.
+    """
+    try:
+        engine = get_pp_structure()
+        result = engine(img_rgb)
+    except Exception as e:
+        import logging
+        logging.warning(f"PP-Structure failed: {e}")
+        return []
+
+    if not result:
+        return []
+
+    tables = []
+    for region in result:
+        if not isinstance(region, dict):
+            continue
+        if region.get("type", "").lower() != "table":
+            continue
+
+        res = region.get("res", {})
+        if not res:
+            continue
+
+        # PP-Structure gives us HTML - parse it into our schema
+        html = res.get("html", "") or ""
+        bbox_raw = region.get("bbox", [0, 0, 0, 0])
+        bbox = [int(x) for x in bbox_raw] if len(bbox_raw) == 4 else [0, 0, 0, 0]
+
+        headers, rows = _parse_html_table(html)
+        if not headers and not rows:
+            continue
+
+        # Build markdown
+        def md_row(cells):
+            return "| " + " | ".join(c or " " for c in cells) + " |"
+
+        separator = "| " + " | ".join("---" for _ in (headers or rows[0] if rows else [])) + " |"
+        md_lines = []
+        if headers:
+            md_lines.append(md_row(headers))
+            md_lines.append(separator)
+        for row in rows:
+            md_lines.append(md_row(row))
+
+        tables.append({
+            "bbox": bbox,
+            "headers": headers,
+            "rows": rows,
+            "text": "\n".join(md_lines),
+            "html": html,
+            "source": "pp_structure",
+        })
+
+    return tables
+
+
+def _parse_html_table(html: str) -> tuple:
+    """
+    Parse PP-Structure HTML table output into (headers, rows).
+    PP-Structure returns a full <table> HTML string.
+    Uses simple regex - no extra dependency needed.
+    """
+    if not html:
+        return [], []
+
+    import re
+
+    # Extract all rows
+    row_pattern = re.compile(r"<tr[^>]*>(.*?)</tr>", re.DOTALL | re.IGNORECASE)
+    cell_pattern = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.DOTALL | re.IGNORECASE)
+    tag_strip = re.compile(r"<[^>]+>")
+
+    all_rows = []
+    for row_match in row_pattern.finditer(html):
+        row_html = row_match.group(1)
+        cells = []
+        for cell_match in cell_pattern.finditer(row_html):
+            cell_text = tag_strip.sub("", cell_match.group(1)).strip()
+            cell_text = cell_text.replace("&nbsp;", " ").replace("&amp;", "&").strip()
+            cells.append(cell_text)
+        if cells:
+            all_rows.append(cells)
+
+    if not all_rows:
+        return [], []
+
+    # Heuristic: first row is header if it looks like labels
+    # (short words, title-case, or the HTML used <th> tags)
+    has_th = bool(re.search(r"<th", html, re.IGNORECASE))
+    first_row = all_rows[0]
+    is_header = has_th or (
+        len(first_row) > 1
+        and all(len(c) < 30 for c in first_row)
+        and sum(1 for c in first_row if c and c[0].isupper()) >= len(first_row) * 0.5
+    )
+
+    if is_header:
+        return first_row, all_rows[1:]
+    return [], all_rows
+
 def _ocr_best_of_presets(img_rgb: np.ndarray, preset: str) -> Tuple[List[dict], str, np.ndarray]:
     """
     Run PaddleOCR on multiple preprocessed versions of the image and return
@@ -233,33 +386,52 @@ def _ocr_one_image(
     engine: str,
     engine_used_first: Optional[str],
     return_debug: bool,
+    use_table_engine: bool = False,
 ) -> Tuple[PageResult, str, str, Optional[dict]]:
     """Run OCR on one image; return (PageResult, preset_used, engine_used, debug)."""
 
     paddle_words, used_preset, used_img = _ocr_best_of_presets(img_rgb, preset=preset)
-    _ = engine  # retained for API compatibility
+    _ = engine
     engine_used = "paddleocr"
     if page_idx == 0:
         engine_used_first = engine_used
 
     h, w = used_img.shape[:2]
 
-    # -- Layout analysis ---------------------------------------------------
-    blocks, columns, tables = analyse_layout(paddle_words, page_width=w, page_height=h)
+    # -- Layout analysis (existing bbox-based system) ---------------------
+    blocks, columns, layout_tables = analyse_layout(paddle_words, page_width=w, page_height=h)
 
-    # -- Build flat Line list (backward compat) from layout blocks --------
+    # -- PP-Structure table extraction (ML-based, optional) ---------------
+    if use_table_engine:
+        pp_tables = _run_pp_structure_tables(used_img)
+    else:
+        pp_tables = []
+
+    # Merge: prefer PP-Structure tables (more accurate) over layout tables
+    # If PP-Structure found tables, use those; otherwise fall back to layout tables
+    if pp_tables:
+        final_tables = pp_tables
+        engine_used = "paddleocr+pp_structure"
+    else:
+        final_tables = layout_tables
+
+    # -- Build flat Line list (backward compat) ---------------------------
+    # Include every block (including noise): do not omit extracted content from plain_text.
     all_lines: List[Line] = []
     page_text_parts: List[str] = []
-
-    for block in blocks:
-        if block.block_type == "noise":
-            continue
+    for block in sorted(blocks, key=lambda b: b.reading_order):
         for ln in block.lines:
             if ln.text.strip():
                 all_lines.append(ln)
                 page_text_parts.append(ln.text)
 
     page_text = "\n".join(page_text_parts).strip()
+    # PP-Structure tables replace layout_tables in final_tables — ensure markdown is in flat text too
+    if pp_tables:
+        md_parts = [(pt.get("text") or "").strip() for pt in pp_tables]
+        md_parts = [m for m in md_parts if m]
+        if md_parts:
+            page_text = "\n\n".join([page_text] + md_parts).strip() if page_text else "\n\n".join(md_parts).strip()
 
     pr = PageResult(
         page_index=page_idx,
@@ -269,7 +441,7 @@ def _ocr_one_image(
         lines=all_lines,
         columns=columns,
         blocks=blocks,
-        tables=tables,
+        tables=final_tables,
     )
 
     debug_entry: Optional[dict] = None
@@ -282,7 +454,9 @@ def _ocr_one_image(
             "lines_count": len(all_lines),
             "blocks_count": len(blocks),
             "columns_count": len(columns),
-            "tables_count": len(tables),
+            "tables_count": len(final_tables),
+            "pp_structure_tables": len(pp_tables),
+            "layout_tables": len(layout_tables),
             "block_types": {
                 bt: sum(1 for b in blocks if b.block_type == bt)
                 for bt in set(b.block_type for b in blocks)
@@ -300,6 +474,7 @@ def run_ocr(
     return_debug: bool = True,
     engine: str = "auto",
     return_layout: bool = True,
+    use_table_engine: bool = False,
 ) -> Dict[str, Any]:
     p = Path(input_path)
     if not p.exists():
@@ -337,6 +512,7 @@ def run_ocr(
         "mkldnn_disabled": True,
         "engine_requested": engine,
         "return_layout": bool(return_layout),
+        "use_table_engine": use_table_engine,
     }
 
     try:
@@ -361,7 +537,8 @@ def run_ocr(
             last_preset = "auto"
             for i, img in enumerate(images):
                 pr, used_preset, engine_used_first, de = _ocr_one_image(
-                    img, len(page_results), preset, engine, engine_used_first, return_debug
+                    img, len(page_results), preset, engine, engine_used_first, return_debug,
+                    use_table_engine=use_table_engine,
                 )
                 page_results.append(pr)
                 last_preset = used_preset
@@ -385,7 +562,8 @@ def run_ocr(
             for slide_idx, (slide_text, slide_images) in enumerate(slides):
                 if slide_images:
                     pr, used_preset, engine_used_first, de = _ocr_one_image(
-                        slide_images[0], slide_idx, preset, engine, engine_used_first, return_debug
+                        slide_images[0], slide_idx, preset, engine, engine_used_first, return_debug,
+                        use_table_engine=use_table_engine,
                     )
                     combined = (slide_text + "\n" + pr.text).strip() if slide_text else pr.text
                     page_results.append(PageResult(pr.page_index, pr.width, pr.height, combined, pr.lines))
@@ -412,7 +590,8 @@ def run_ocr(
 
         for page_idx, img_rgb in enumerate(imgs):
             pr, used_preset, engine_used_first, de = _ocr_one_image(
-                img_rgb, page_idx, preset, engine, engine_used_first, return_debug
+                img_rgb, page_idx, preset, engine, engine_used_first, return_debug,
+                use_table_engine=use_table_engine,
             )
             page_results.append(pr)
             meta["preset_used"] = used_preset

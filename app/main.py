@@ -72,6 +72,12 @@ def _shape_response(filename: str, raw_json: Dict[str, Any]) -> Dict[str, Any]:
             "columns": len(page.get("columns", [])),
             "block_counts": block_types,
             "table_count": len(page_tables),
+            "table_source": (
+                "pp_structure" if any(
+                    t.get("source") == "pp_structure"
+                    for t in page_tables
+                ) else "layout"
+            ),
         })
 
     response: Dict[str, Any] = {
@@ -96,11 +102,27 @@ def health():
 @app.post("/ocr")
 async def ocr_endpoint(
     file: UploadFile = File(...),
-    preset: str = Query(default="auto", description="Preprocessing preset: auto | clean_doc | photo | low_light | scan_enhance | printed_hq"),
-    dpi: int = Query(default=150, ge=72, le=600, description="DPI for PDF rendering"),
+    preset: str = Query(
+        default="auto",
+        description="Preprocessing preset: auto | clean_doc | printed_hq | photo | low_light | scan_enhance | form_grid | screenshot"
+    ),
+    content_type: str = Query(
+        default="auto",
+        description="Document type hint: auto | form | screenshot | scan | photo | document"
+    ),
+    dpi: int = Query(default=200, ge=72, le=600, description="DPI for PDF rendering"),
     max_pages: int = Query(default=5, ge=1, le=200, description="Max pages to process"),
     return_debug: bool = Query(default=False, description="Include per-page debug info in response"),
     return_layout: bool = Query(default=True, description="Include layout zone info"),
+    use_table_engine: bool = Query(
+        default=False,
+        description=(
+            "Use PP-Structure ML model for table detection. "
+            "More accurate for complex tables with merged cells or no borders. "
+            "Slower (~2-3x). Recommended for: insurance tables, hospital bills, "
+            "bank statements, invoice line items."
+        )
+    ),
 ):
     """
     Extract text from a document or image using PaddleOCR.
@@ -110,6 +132,17 @@ async def ocr_endpoint(
     - `raw_json`: full OCR output with per-page word bounding boxes and confidence scores
     """
     _check_extension(file.filename or "upload")
+
+    # Map content_type -> preset
+    _CT_MAP = {
+        "form": "form_grid",
+        "screenshot": "screenshot",
+        "scan": "scan_enhance",
+        "photo": "photo",
+        "document": "printed_hq",
+    }
+    effective_preset = _CT_MAP.get(content_type.lower(), preset)
+
     suffix = Path(file.filename or "upload").suffix.lower()
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -123,12 +156,13 @@ async def ocr_endpoint(
     try:
         raw = run_ocr(
             input_path=str(tmp_path),
-            preset=preset,
+            preset=effective_preset,
             dpi=dpi,
             max_pages=max_pages,
             return_debug=return_debug,
             engine="auto",
             return_layout=return_layout,
+            use_table_engine=use_table_engine,
         )
         return JSONResponse(content=_shape_response(file.filename or "upload", raw))
     finally:
@@ -142,10 +176,20 @@ async def ocr_endpoint(
 async def ocr_batch_endpoint(
     files: List[UploadFile] = File(...),
     preset: str = Query(default="auto"),
-    dpi: int = Query(default=150, ge=72, le=600),
+    content_type: str = Query(default="auto"),
+    dpi: int = Query(default=200, ge=72, le=600),
     max_pages: int = Query(default=5, ge=1, le=200),
     return_debug: bool = Query(default=False),
     return_layout: bool = Query(default=True),
+    use_table_engine: bool = Query(
+        default=False,
+        description=(
+            "Use PP-Structure ML model for table detection. "
+            "More accurate for complex tables with merged cells or no borders. "
+            "Slower (~2-3x). Recommended for: insurance tables, hospital bills, "
+            "bank statements, invoice line items."
+        )
+    ),
 ):
     """
     Extract text from up to 10 files in one request.
@@ -156,6 +200,15 @@ async def ocr_batch_endpoint(
         raise HTTPException(status_code=400, detail="No files uploaded.")
     if len(files) > 10:
         raise HTTPException(status_code=400, detail="Batch limit is 10 files.")
+
+    _CT_MAP = {
+        "form": "form_grid",
+        "screenshot": "screenshot",
+        "scan": "scan_enhance",
+        "photo": "photo",
+        "document": "printed_hq",
+    }
+    effective_preset = _CT_MAP.get(content_type.lower(), preset)
 
     for f in files:
         _check_extension(f.filename or "upload")
@@ -173,12 +226,13 @@ async def ocr_batch_endpoint(
         for tp, f in zip(tmp_paths, files):
             raw = run_ocr(
                 input_path=str(tp),
-                preset=preset,
+                preset=effective_preset,
                 dpi=dpi,
                 max_pages=max_pages,
                 return_debug=return_debug,
                 engine="auto",
                 return_layout=return_layout,
+                use_table_engine=use_table_engine,
             )
             results.append(_shape_response(f.filename or "upload", raw))
 
