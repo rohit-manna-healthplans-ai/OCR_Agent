@@ -1,71 +1,34 @@
 from __future__ import annotations
 
-import logging
-import warnings
+import re
+import statistics
 from typing import List, Dict, Any
 
-import pkg_resources
-import spacy
-from symspellpy import SymSpell, Verbosity
+_MULTI_SP = re.compile(r" {2,}")
 
-from ocr.postprocess import fix_common_paddle_errors
-
-logger = logging.getLogger(__name__)
+_UI_OVERLAYS = frozenset({
+    "edit with lovable", "lovable app", "edit with",
+    "powered by", "beta", "preview",
+})
 
 
 class FastLocalCPUParser:
 
     def __init__(self):
-        self.sym_spell = SymSpell(max_dictionary_edit_distance=2, prefix_length=7)
-        dictionary_path = pkg_resources.resource_filename(
-            "symspellpy", "frequency_dictionary_en_82_765.txt"
-        )
-        self.sym_spell.load_dictionary(dictionary_path, term_index=0, count_index=1)
-        try:
-            self.nlp = spacy.load("en_core_web_sm")
-        except OSError:
-            warnings.warn(
-                "en_core_web_sm not found; run: python -m spacy download en_core_web_sm "
-                "or install the wheel from requirements.txt. "
-                "Using blank English pipeline.",
-                stacklevel=1,
-            )
-            logger.warning("spaCy model en_core_web_sm missing; using spacy.blank('en')")
-            self.nlp = spacy.blank("en")
+        # No models to load — fast startup
+        pass
 
     def fix_text(self, text: str) -> str:
-        if not text or len(text.strip()) < 2:
-            return text
-
-        t = fix_common_paddle_errors(text)
-
-        doc = self.nlp(t)
-        out = []
-        for token in doc:
-            word = token.text
-            skip = (
-                token.ent_type_
-                or token.pos_ in ("PROPN", "NUM", "SYM", "PUNCT", "X")
-                or not word.isalpha()
-                or not word.islower()
-                or len(word) <= 2
-                or any(c.isdigit() for c in word)
-            )
-            if skip:
-                out.append(token.text_with_ws)
-                continue
-            if len(word) > 3:
-                suggestions = self.sym_spell.lookup(
-                    word, Verbosity.CLOSEST, max_edit_distance=2
-                )
-                if suggestions and suggestions[0].term != word:
-                    out.append(suggestions[0].term + token.whitespace_)
-                else:
-                    out.append(token.text_with_ws)
-            else:
-                out.append(token.text_with_ws)
-
-        return "".join(out).strip()
+        """
+        Minimal cleanup only:
+        - Collapse multiple spaces into one
+        - Strip leading/trailing whitespace
+        - Never changes words, never corrects spelling
+        """
+        if not text:
+            return ""
+        t = _MULTI_SP.sub(" ", text)
+        return t.strip()
 
     def _render_heading(self, block: Dict) -> List[str]:
         out = []
@@ -120,7 +83,7 @@ class FastLocalCPUParser:
         out = []
         for ln in block.get("lines", []):
             t = self.fix_text(ln.get("text", "").strip())
-            if t:
+            if t and t.lower().strip() not in _UI_OVERLAYS:
                 out.append(t)
         return out
 
@@ -165,8 +128,6 @@ class FastLocalCPUParser:
         return [f"<{tag}>"] + rendered + [""]
 
     def _fallback_render(self, page: Dict) -> List[str]:
-        import statistics
-
         W = page.get("width", 1920) or 1920
         H = page.get("height", 1080) or 1080
         all_words = []
