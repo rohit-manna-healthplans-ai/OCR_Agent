@@ -163,7 +163,7 @@ def get_paddle() -> Any:
     return _OCR_INSTANCE
 
 # Max dimension for OCR (larger images are downscaled for speed)
-MAX_OCR_DIM = 2400  # Larger dim = more detail for PaddleOCR detection
+MAX_OCR_DIM = int(os.getenv("OCR_MAX_IMAGE_DIM", "2400"))
 
 
 def _downscale_if_large(img_rgb: np.ndarray, max_dim: int = MAX_OCR_DIM) -> np.ndarray:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import List, Tuple, Optional, Dict, Any
 from pathlib import Path
 
@@ -8,7 +9,13 @@ import pdfplumber
 import numpy as np
 
 
-def extract_text_if_digital(pdf_path: str, min_chars_per_page: int = 200, max_pages: int = 10) -> Optional[Dict[str, Any]]:
+def extract_text_if_digital(
+    pdf_path: str,
+    min_chars_per_page: Optional[int] = None,
+    max_pages: int = 10,
+) -> Optional[Dict[str, Any]]:
+    if min_chars_per_page is None:
+        min_chars_per_page = int(os.getenv("DIGITAL_PDF_MIN_CHARS_PER_PAGE", "200"))
     """
     If PDF has selectable text, return it (best accuracy) and skip OCR.
     """

@@ -87,6 +87,42 @@ def _check_extension(filename: str) -> None:
         )
 
 
+# ═════════════════════════════════════════════════════════════════════
+#  SETTINGS — all tunable via .env (see .env in repo root)
+# ═════════════════════════════════════════════════════════════════════
+
+def _env_bool(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(
+    name: str,
+    default: str,
+    lo: Optional[int] = None,
+    hi: Optional[int] = None,
+) -> int:
+    value = int(os.getenv(name, default))
+    if lo is not None:
+        value = max(lo, value)
+    if hi is not None:
+        value = min(hi, value)
+    return value
+
+
+# API /ocr defaults (query params can still override per request)
+_OCR_PRESET            = os.getenv("OCR_PRESET", "auto").strip()
+_OCR_CONTENT_TYPE      = os.getenv("OCR_CONTENT_TYPE", "auto").strip()
+_OCR_ENGINE            = os.getenv("OCR_ENGINE", "auto").strip()
+_OCR_DPI_MIN           = _env_int("OCR_DPI_MIN", "72", 72, 600)
+_OCR_DPI_MAX           = _env_int("OCR_DPI_MAX", "600", 72, 600)
+_OCR_DPI_DEFAULT       = _env_int("OCR_DPI", "200", _OCR_DPI_MIN, _OCR_DPI_MAX)
+_OCR_MAX_PAGES_MAX     = _env_int("OCR_MAX_PAGES_MAX", "200", 1, 500)
+_OCR_MAX_PAGES_DEFAULT = _env_int("OCR_MAX_PAGES", "5", 1, _OCR_MAX_PAGES_MAX)
+_OCR_RETURN_DEBUG      = _env_bool("OCR_RETURN_DEBUG", "false")
+_OCR_RETURN_LAYOUT     = _env_bool("OCR_RETURN_LAYOUT", "true")
+_OCR_USE_TABLE_ENGINE  = _env_bool("OCR_USE_TABLE_ENGINE", "false")
+_OCR_BATCH_MAX_FILES   = _env_int("OCR_BATCH_MAX_FILES", "10", 1, 50)
+
 _CT_MAP = {
     "form":       "form_grid",
     "screenshot": "screenshot",
@@ -140,23 +176,46 @@ def _shape_response(filename: str, raw_json: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.get("/health")
 def health():
-    """Liveness check — also shows worker status."""
+    """Liveness check — also shows worker status and active .env defaults."""
     return {
         "status": "ok",
         "worker": _worker_status(),
+        "settings": {
+            "api": {
+                "preset": _OCR_PRESET,
+                "content_type": _OCR_CONTENT_TYPE,
+                "engine": _OCR_ENGINE,
+                "dpi": _OCR_DPI_DEFAULT,
+                "dpi_min": _OCR_DPI_MIN,
+                "dpi_max": _OCR_DPI_MAX,
+                "max_pages": _OCR_MAX_PAGES_DEFAULT,
+                "max_pages_cap": _OCR_MAX_PAGES_MAX,
+                "return_debug": _OCR_RETURN_DEBUG,
+                "return_layout": _OCR_RETURN_LAYOUT,
+                "use_table_engine": _OCR_USE_TABLE_ENGINE,
+                "batch_max_files": _OCR_BATCH_MAX_FILES,
+            },
+            "worker_ocr": {
+                "preset": _W_OCR_PRESET,
+                "dpi": _W_OCR_DPI,
+                "max_pages": _W_MAX_PAGES,
+                "engine": _W_OCR_ENGINE,
+                "use_table_engine": _W_USE_TABLE_ENGINE,
+            },
+        },
     }
 
 
 @app.post("/ocr")
 async def ocr_endpoint(
     file: UploadFile = File(...),
-    preset: str = Query(default="auto"),
-    content_type: str = Query(default="auto"),
-    dpi: int = Query(default=200, ge=72, le=600),
-    max_pages: int = Query(default=5, ge=1, le=200),
-    return_debug: bool = Query(default=False),
-    return_layout: bool = Query(default=True),
-    use_table_engine: bool = Query(default=False),
+    preset: str = Query(default=_OCR_PRESET),
+    content_type: str = Query(default=_OCR_CONTENT_TYPE),
+    dpi: int = Query(default=_OCR_DPI_DEFAULT, ge=_OCR_DPI_MIN, le=_OCR_DPI_MAX),
+    max_pages: int = Query(default=_OCR_MAX_PAGES_DEFAULT, ge=1, le=_OCR_MAX_PAGES_MAX),
+    return_debug: bool = Query(default=_OCR_RETURN_DEBUG),
+    return_layout: bool = Query(default=_OCR_RETURN_LAYOUT),
+    use_table_engine: bool = Query(default=_OCR_USE_TABLE_ENGINE),
 ):
     _check_extension(file.filename or "upload")
     effective_preset = _CT_MAP.get(content_type.lower(), preset)
@@ -177,7 +236,7 @@ async def ocr_endpoint(
             dpi=dpi,
             max_pages=max_pages,
             return_debug=return_debug,
-            engine="auto",
+            engine=_OCR_ENGINE,
             return_layout=return_layout,
             use_table_engine=use_table_engine,
         )
@@ -192,18 +251,21 @@ async def ocr_endpoint(
 @app.post("/ocr-batch")
 async def ocr_batch_endpoint(
     files: List[UploadFile] = File(...),
-    preset: str = Query(default="auto"),
-    content_type: str = Query(default="auto"),
-    dpi: int = Query(default=200, ge=72, le=600),
-    max_pages: int = Query(default=5, ge=1, le=200),
-    return_debug: bool = Query(default=False),
-    return_layout: bool = Query(default=True),
-    use_table_engine: bool = Query(default=False),
+    preset: str = Query(default=_OCR_PRESET),
+    content_type: str = Query(default=_OCR_CONTENT_TYPE),
+    dpi: int = Query(default=_OCR_DPI_DEFAULT, ge=_OCR_DPI_MIN, le=_OCR_DPI_MAX),
+    max_pages: int = Query(default=_OCR_MAX_PAGES_DEFAULT, ge=1, le=_OCR_MAX_PAGES_MAX),
+    return_debug: bool = Query(default=_OCR_RETURN_DEBUG),
+    return_layout: bool = Query(default=_OCR_RETURN_LAYOUT),
+    use_table_engine: bool = Query(default=_OCR_USE_TABLE_ENGINE),
 ):
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded.")
-    if len(files) > 10:
-        raise HTTPException(status_code=400, detail="Batch limit is 10 files.")
+    if len(files) > _OCR_BATCH_MAX_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Batch limit is {_OCR_BATCH_MAX_FILES} files.",
+        )
 
     effective_preset = _CT_MAP.get(content_type.lower(), preset)
     for f in files:
@@ -226,7 +288,7 @@ async def ocr_batch_endpoint(
                 dpi=dpi,
                 max_pages=max_pages,
                 return_debug=return_debug,
-                engine="auto",
+                engine=_OCR_ENGINE,
                 return_layout=return_layout,
                 use_table_engine=use_table_engine,
             )
@@ -257,6 +319,10 @@ _W_POLL_SEC          = float(os.getenv("POLL_INTERVAL_SEC", "3"))
 _W_MAX_CANDIDATES    = int(os.getenv("MAX_PENDING_CANDIDATES", "800"))
 _W_COOLDOWN_SEC      = int(os.getenv("COOLDOWN_SEC", "600"))
 _W_COOLDOWN_MAX      = int(os.getenv("COOLDOWN_MAX_ITEMS", "5000"))
+_W_RETRY_UNTIL_SUCCESS = os.getenv("WORKER_RETRY_UNTIL_SUCCESS", "true").lower() == "true"
+_W_RETRY_BASE_SEC    = max(5, int(os.getenv("WORKER_RETRY_BASE_SEC", "15")))
+_W_RETRY_MAX_SEC     = max(_W_RETRY_BASE_SEC, int(os.getenv("WORKER_RETRY_MAX_SEC", "120")))
+_W_GIVE_UP_AFTER     = int(os.getenv("WORKER_GIVE_UP_AFTER", "0"))  # 0 = never stop retrying
 
 _W_DOWNLOAD_TIMEOUT  = float(os.getenv("DOWNLOAD_TIMEOUT_SEC", "45"))
 _W_MAX_IMG_BYTES     = int(os.getenv("MAX_IMAGE_BYTES", str(12 * 1024 * 1024)))
@@ -266,16 +332,25 @@ _W_AZURE_CONN_STR    = os.getenv("AZURE_STORAGE_CONNECTION_STRING", "").strip()
 _W_AZURE_SAS_TOKEN   = os.getenv("AZURE_BLOB_SAS_TOKEN", "").strip()
 _W_AZURE_CONTAINER   = os.getenv("AZURE_STORAGE_CONTAINER", "screenshots").strip() or "screenshots"
 
-# OCR preset for worker (screenshots → screenshot preset by default)
-_W_OCR_PRESET        = os.getenv("WORKER_OCR_PRESET", "screenshot")
-_W_USE_TABLE_ENGINE  = os.getenv("WORKER_USE_TABLE_ENGINE", "false").lower() == "true"
-_W_MAX_PAGES         = int(os.getenv("WORKER_MAX_PAGES", "1"))
+# Worker OCR (screenshots) — defaults from .env
+_W_OCR_PRESET        = os.getenv("WORKER_OCR_PRESET", os.getenv("OCR_PRESET", "screenshot")).strip()
+_W_OCR_DPI           = _env_int("WORKER_DPI", os.getenv("OCR_DPI", "200"), _OCR_DPI_MIN, _OCR_DPI_MAX)
+_W_USE_TABLE_ENGINE  = _env_bool("WORKER_USE_TABLE_ENGINE", os.getenv("OCR_USE_TABLE_ENGINE", "false"))
+_W_MAX_PAGES         = _env_int("WORKER_MAX_PAGES", "1", 1, _OCR_MAX_PAGES_MAX)
+_W_OCR_ENGINE        = os.getenv("WORKER_ENGINE", os.getenv("OCR_ENGINE", "auto")).strip()
+_W_WORKER_RETURN_DEBUG   = _env_bool("WORKER_RETURN_DEBUG", os.getenv("OCR_RETURN_DEBUG", "false"))
+_W_WORKER_RETURN_LAYOUT  = _env_bool("WORKER_RETURN_LAYOUT", os.getenv("OCR_RETURN_LAYOUT", "true"))
 
 # ── Worker state (thread-safe via GIL for simple reads/writes) ────────
 _worker_state: Dict[str, Any] = {
     "status":   "off",   # off | starting | running | idle | error
     "processed": 0,
+    "attempted": 0,
     "errors":    0,
+    "pending_count": 0,
+    "validation_failure_count": 0,
+    "cooldown_active_count": 0,
+    "retry_scheduled_count": 0,
     "last_run":  None,
 }
 
@@ -298,11 +373,70 @@ def _cooldown_until(seconds: int) -> str:
     ).isoformat().replace("+00:00", "Z")
 
 
+def _schedule_retry(
+    item_id: str,
+    cooldown: Dict[str, str],
+    retry_counts: Dict[str, int],
+) -> bool:
+    """
+    Schedule retry with short exponential backoff (retry-until-success mode).
+    Returns False only if WORKER_GIVE_UP_AFTER > 0 and limit reached.
+    """
+    n = int(retry_counts.get(item_id, 0)) + 1
+    retry_counts[item_id] = n
+
+    if _W_GIVE_UP_AFTER > 0 and n >= _W_GIVE_UP_AFTER:
+        logger.error(
+            "Giving up after %d attempts (item_id=%s) — set WORKER_GIVE_UP_AFTER=0 to never give up",
+            n,
+            item_id,
+        )
+        cooldown.pop(item_id, None)
+        return False
+
+    if _W_RETRY_UNTIL_SUCCESS:
+        sec = min(_W_RETRY_BASE_SEC * (2 ** min(n - 1, 5)), _W_RETRY_MAX_SEC)
+    else:
+        sec = _W_COOLDOWN_SEC
+
+    cooldown[item_id] = _cooldown_until(sec)
+    return True
+
+
+def _clear_retry_state(
+    item_id: str,
+    cooldown: Dict[str, str],
+    retry_counts: Dict[str, int],
+) -> None:
+    cooldown.pop(item_id, None)
+    retry_counts.pop(item_id, None)
+
+
 def _pending_filter() -> Dict[str, Any]:
-    """Documents without ocr_text and with a valid screenshot_url."""
+    """Pending = no ocr_text, empty ocr_text, or null — plus valid screenshot_url."""
     return {
-        "ocr_text":       {"$exists": False},
-        "screenshot_url": {"$regex": r"^https?://"},
+        "$and": [
+            {
+                "$or": [
+                    {"ocr_text": {"$exists": False}},
+                    {"ocr_text": None},
+                    {"ocr_text": ""},
+                ]
+            },
+            {"screenshot_url": {"$regex": r"^https?://"}},
+        ]
+    }
+
+
+def _pending_save_filter(doc_id: Any) -> Dict[str, Any]:
+    """Allow save only when ocr_text is not already present with real content."""
+    return {
+        "_id": doc_id,
+        "$or": [
+            {"ocr_text": {"$exists": False}},
+            {"ocr_text": None},
+            {"ocr_text": ""},
+        ],
     }
 
 
@@ -326,23 +460,98 @@ def _save_ocr_text(
     set_doc: Dict[str, Any] = {"ocr_text": text}
     if extraction_blob_path:
         set_doc["extraction_blob_path"] = extraction_blob_path
-    col.update_one(
-        {"_id": doc_id, "ocr_text": {"$exists": False}},
-        {"$set": set_doc},
-    )
+    col.update_one(_pending_save_filter(doc_id), {"$set": set_doc})
 
 
 def _load_state(state_col: Any) -> Dict[str, Any]:
     return state_col.find_one({"_id": _W_STATE_DOC_ID}) or {}
 
 
-def _save_state(state_col: Any, mode: str, cooldown: Dict[str, str]) -> None:
-    if len(cooldown) > _W_COOLDOWN_MAX:
-        items = sorted(cooldown.items(), key=lambda kv: kv[1])
-        cooldown = dict(items[-_W_COOLDOWN_MAX:])
+def _prune_cooldown(cooldown: Dict[str, str]) -> Dict[str, str]:
+    """Drop expired cooldown entries so failed items become eligible again."""
+    now = _utc_now_iso()
+    pruned: Dict[str, str] = {}
+    for key, until in cooldown.items():
+        if isinstance(until, str) and until > now:
+            pruned[key] = until
+    return pruned
+
+
+def _trim_cooldown(cooldown: Dict[str, str]) -> Dict[str, str]:
+    """Keep only the soonest-to-expire active cooldown entries when over limit."""
+    if len(cooldown) <= _W_COOLDOWN_MAX:
+        return cooldown
+    items = sorted(cooldown.items(), key=lambda kv: kv[1])
+    return dict(items[:_W_COOLDOWN_MAX])
+
+
+def _update_reconciliation_stats(
+    col: Any,
+    validation_col: Any,
+    cooldown: Dict[str, str],
+) -> None:
+    """Refresh queue visibility metrics (used by /health)."""
+    now = _utc_now_iso()
+    try:
+        _worker_state["pending_count"] = col.count_documents(_pending_filter())
+        _worker_state["validation_failure_count"] = validation_col.count_documents(
+            {"status": "failure"}
+        )
+        _worker_state["cooldown_active_count"] = sum(
+            1 for v in cooldown.values() if isinstance(v, str) and v > now
+        )
+        _worker_state["retry_scheduled_count"] = len(cooldown)
+    except Exception as e:
+        logger.debug("Reconciliation stats update failed: %s", e)
+
+
+def _fetch_failed_validation_ids(validation_col: Any, limit: int = 1000) -> set:
+    """screenshot_ids that failed previously — retry these before new pending items."""
+    try:
+        rows = validation_col.find(
+            {"status": "failure"},
+            {"_id": 1},
+        ).limit(limit)
+        return {str(r["_id"]) for r in rows if r.get("_id")}
+    except Exception as e:
+        logger.debug("Failed validation id fetch failed: %s", e)
+        return set()
+
+
+def _sort_candidates_for_retry(
+    docs: List[Dict[str, Any]],
+    failed_ids: set,
+    retry_counts: Dict[str, int],
+) -> List[Dict[str, Any]]:
+    """Prioritize validation failures, then most attempts, then oldest ts."""
+
+    def sort_key(doc: Dict[str, Any]) -> tuple:
+        ck = _cooldown_key(doc)
+        is_retry = ck in failed_ids
+        attempts = int(retry_counts.get(ck, 0))
+        ts = doc.get("ts")
+        return (0 if is_retry else 1, -attempts, ts if ts is not None else "")
+
+    return sorted(docs, key=sort_key)
+
+
+def _save_state(
+    state_col: Any,
+    mode: str,
+    cooldown: Dict[str, str],
+    retry_counts: Optional[Dict[str, int]] = None,
+) -> None:
+    cooldown = _trim_cooldown(_prune_cooldown(cooldown))
+    payload: Dict[str, Any] = {
+        "mode": mode,
+        "cooldown": cooldown,
+        "updated_at": _utc_now_iso(),
+    }
+    if retry_counts is not None:
+        payload["retry_counts"] = retry_counts
     state_col.update_one(
         {"_id": _W_STATE_DOC_ID},
-        {"$set": {"mode": mode, "cooldown": cooldown, "updated_at": _utc_now_iso()}},
+        {"$set": payload},
         upsert=True,
     )
 
@@ -355,26 +564,29 @@ def _save_state_with_batch(
     batch_total: int,
     batch_success: int,
     batch_failure: int,
+    last_failed_ids: Optional[List[str]] = None,
+    retry_counts: Optional[Dict[str, int]] = None,
 ) -> None:
-    if len(cooldown) > _W_COOLDOWN_MAX:
-        items = sorted(cooldown.items(), key=lambda kv: kv[1])
-        cooldown = dict(items[-_W_COOLDOWN_MAX:])
+    cooldown = _trim_cooldown(_prune_cooldown(cooldown))
+    payload: Dict[str, Any] = {
+        "mode": mode,
+        "cooldown": cooldown,
+        "updated_at": _utc_now_iso(),
+        "last_batch": {
+            "status": batch_status,
+            "total": batch_total,
+            "success_count": batch_success,
+            "failure_count": batch_failure,
+            "ts": _utc_now_iso(),
+        },
+    }
+    if retry_counts is not None:
+        payload["retry_counts"] = retry_counts
+    if last_failed_ids:
+        payload["last_failed_screenshot_ids"] = last_failed_ids[:50]
     state_col.update_one(
         {"_id": _W_STATE_DOC_ID},
-        {
-            "$set": {
-                "mode": mode,
-                "cooldown": cooldown,
-                "updated_at": _utc_now_iso(),
-                "last_batch": {
-                    "status": batch_status,  # success | failure
-                    "total": batch_total,
-                    "success_count": batch_success,
-                    "failure_count": batch_failure,
-                    "ts": _utc_now_iso(),
-                },
-            }
-        },
+        {"$set": payload},
         upsert=True,
     )
 
@@ -731,6 +943,7 @@ def _process_item(
     col: Any,
     validation_col: Any,
     cooldown: Dict[str, str],
+    retry_counts: Dict[str, int],
 ) -> bool:
     """
     Download one image, run OCR directly via run_ocr(), save result to MongoDB.
@@ -764,7 +977,7 @@ def _process_item(
             _record_stage("downloaded", "failure")
         except Exception as ve:
             logger.warning("Validation stage failed (item_id=%s): %s", item_id, ve)
-        cooldown[item_id] = _cooldown_until(_W_COOLDOWN_SEC)
+        _schedule_retry(item_id, cooldown, retry_counts)
         return False
 
     # 2. Write to temp file (run_ocr expects a file path)
@@ -779,7 +992,7 @@ def _process_item(
             _record_stage("ocr_extracted", "failure")
         except Exception as ve:
             logger.warning("Validation stage failed (item_id=%s): %s", item_id, ve)
-        cooldown[item_id] = _cooldown_until(_W_COOLDOWN_SEC)
+        _schedule_retry(item_id, cooldown, retry_counts)
         return False
 
     # 3. Run OCR — direct function call, no HTTP
@@ -787,15 +1000,23 @@ def _process_item(
         raw = run_ocr(
             input_path=tmp_path,
             preset=_W_OCR_PRESET,
-            dpi=200,
+            dpi=_W_OCR_DPI,
             max_pages=_W_MAX_PAGES,
-            return_debug=False,
-            engine="auto",
-            return_layout=True,
+            return_debug=_W_WORKER_RETURN_DEBUG,
+            engine=_W_OCR_ENGINE,
+            return_layout=_W_WORKER_RETURN_LAYOUT,
             use_table_engine=_W_USE_TABLE_ENGINE,
         )
         result  = _shape_response(item_id + ext, raw)
         ocr_text = result.get("formatted_text", "") or result.get("plain_text", "")
+        if not (ocr_text and str(ocr_text).strip()):
+            logger.warning("OCR returned empty text (item_id=%s)", item_id)
+            try:
+                _record_stage("ocr_extracted", "failure")
+            except Exception as ve:
+                logger.warning("Validation stage failed (item_id=%s): %s", item_id, ve)
+            _schedule_retry(item_id, cooldown, retry_counts)
+            return False
         try:
             _record_stage("ocr_extracted", "success")
         except Exception as e:
@@ -806,7 +1027,7 @@ def _process_item(
             _record_stage("ocr_extracted", "failure")
         except Exception as ve:
             logger.warning("Validation stage failed (item_id=%s): %s", item_id, ve)
-        cooldown[item_id] = _cooldown_until(_W_COOLDOWN_SEC)
+        _schedule_retry(item_id, cooldown, retry_counts)
         return False
     finally:
         try:
@@ -823,6 +1044,7 @@ def _process_item(
             _record_stage("stored", "success")
         except Exception as e:
             logger.warning("Validation stage failed (item_id=%s): %s", item_id, e)
+        _clear_retry_state(item_id, cooldown, retry_counts)
         logger.debug("OCR saved (item_id=%s, chars=%d)", item_id, len(ocr_text))
         return True
     except Exception as e:
@@ -831,7 +1053,7 @@ def _process_item(
             _record_stage("stored", "failure")
         except Exception as ve:
             logger.warning("Validation stage failed (item_id=%s): %s", item_id, ve)
-        cooldown[item_id] = _cooldown_until(_W_COOLDOWN_SEC)
+        _schedule_retry(item_id, cooldown, retry_counts)
         return False
 
 
@@ -840,19 +1062,23 @@ def _process_batch(
     col: Any,
     validation_col: Any,
     cooldown: Dict[str, str],
-) -> Tuple[int, int]:
-    """Process a batch of items. Returns (success_count, failure_count)."""
+    retry_counts: Dict[str, int],
+) -> Tuple[int, int, List[str]]:
+    """Process a batch of items. Returns (success_count, failure_count, failed_ids)."""
     updated = 0
     failed = 0
+    failed_ids: List[str] = []
     for item in batch:
-        ok = _process_item(item, col, validation_col, cooldown)
+        _worker_state["attempted"] = int(_worker_state.get("attempted", 0)) + 1
+        ok = _process_item(item, col, validation_col, cooldown, retry_counts)
         if ok:
             updated += 1
             _worker_state["processed"] += 1
         else:
             failed += 1
             _worker_state["errors"] += 1
-    return updated, failed
+            failed_ids.append(str(item.get("item_id", "")))
+    return updated, failed, failed_ids
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -880,23 +1106,43 @@ def _worker_loop() -> None:
 
     state    = _load_state(state_col)
     cooldown = state.get("cooldown") if isinstance(state.get("cooldown"), dict) else {}
-    logger.info("OCR Worker loaded state | cooldown entries=%d", len(cooldown))
+    retry_counts: Dict[str, int] = {}
+    if isinstance(state.get("retry_counts"), dict):
+        retry_counts = {str(k): int(v) for k, v in state["retry_counts"].items()}
+    cooldown = _prune_cooldown(cooldown)
+    logger.info(
+        "OCR Worker loaded | cooldown=%d retry_tracking=%d retry_until_success=%s base=%ss max=%ss",
+        len(cooldown),
+        len(retry_counts),
+        _W_RETRY_UNTIL_SUCCESS,
+        _W_RETRY_BASE_SEC,
+        _W_RETRY_MAX_SEC,
+    )
 
     while True:
         try:
+            cooldown = _prune_cooldown(cooldown)
+            _update_reconciliation_stats(col, validation_col, cooldown)
+
             candidates = _fetch_pending(col, _W_MAX_CANDIDATES)
 
             if not candidates:
                 _worker_state["status"] = "idle"
-                _save_state(state_col, "IDLE", cooldown)
+                _save_state(state_col, "IDLE", cooldown, retry_counts)
                 time.sleep(_W_POLL_SEC)
                 continue
+
+            failed_validation_ids = _fetch_failed_validation_ids(validation_col)
+            candidates = _sort_candidates_for_retry(
+                candidates, failed_validation_ids, retry_counts
+            )
 
             queues = _build_queues(candidates, cooldown)
             if not any(bool(q) for q in queues.values()):
                 _worker_state["status"] = "idle"
-                _save_state(state_col, "COOLDOWN_ONLY", cooldown)
-                time.sleep(_W_POLL_SEC)
+                _save_state(state_col, "COOLDOWN_ONLY", cooldown, retry_counts)
+                # Short sleep when items are in brief retry backoff
+                time.sleep(2.0 if _W_RETRY_UNTIL_SUCCESS else _W_POLL_SEC)
                 continue
 
             batch = _round_robin(queues, _W_BATCH_SIZE)
@@ -907,14 +1153,18 @@ def _worker_loop() -> None:
             _worker_state["status"] = "running"
             _worker_state["last_run"] = _utc_now_iso()
             batch_t0 = time.perf_counter()
-            updated, failed = _process_batch(batch, col, validation_col, cooldown)
+            updated, failed, batch_failed_ids = _process_batch(
+                batch, col, validation_col, cooldown, retry_counts
+            )
             took_s = time.perf_counter() - batch_t0
             logger.info(
-                "Batch total=%d done=%d failed=%d took=%.2fs",
+                "Batch total=%d done=%d failed=%d took=%.2fs pending=%s failures=%s",
                 len(batch),
                 updated,
                 failed,
                 took_s,
+                _worker_state.get("pending_count"),
+                _worker_state.get("validation_failure_count"),
             )
 
             if failed > 0:
@@ -926,6 +1176,8 @@ def _worker_loop() -> None:
                     batch_total=len(batch),
                     batch_success=updated,
                     batch_failure=failed,
+                    last_failed_ids=batch_failed_ids,
+                    retry_counts=retry_counts,
                 )
             else:
                 _save_state_with_batch(
@@ -936,10 +1188,21 @@ def _worker_loop() -> None:
                     batch_total=len(batch),
                     batch_success=updated,
                     batch_failure=0,
+                    retry_counts=retry_counts,
                 )
 
-            # If we updated items, poll immediately; else wait
-            time.sleep(0.2 if updated > 0 else _W_POLL_SEC)
+            _update_reconciliation_stats(col, validation_col, cooldown)
+
+            # Retry-until-success: re-poll quickly after failures or successes
+            if _W_RETRY_UNTIL_SUCCESS:
+                if failed > 0:
+                    time.sleep(1.0)
+                elif updated > 0:
+                    time.sleep(0.2)
+                else:
+                    time.sleep(_W_POLL_SEC)
+            else:
+                time.sleep(0.2 if updated > 0 else _W_POLL_SEC)
 
         except KeyboardInterrupt:
             break
@@ -955,6 +1218,7 @@ def _worker_loop() -> None:
                     batch_total=0,
                     batch_success=0,
                     batch_failure=0,
+                    retry_counts=retry_counts,
                 )
             except Exception:
                 logger.exception("Failed to update ocr_state after worker error")
